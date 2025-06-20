@@ -13,12 +13,11 @@ RUN apt-get update && \
 # Tetapkan direktori kerja di dalam container
 WORKDIR /app
 
-# Salin file requirements dan install semua library Python
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Salin semua kode Python Anda
-COPY ./app /app/app
+# (PERBAIKAN KUNCI) Salin kode Python Anda dari folder backend/app
+COPY backend/app /app/app
 
 # Perintah untuk menjalankan aplikasi menggunakan Gunicorn
 CMD [ "gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "--timeout", "400", "app.main:app" ]
