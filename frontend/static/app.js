@@ -1,9 +1,4 @@
-// ==============================================================================
-//  GLOBAL CONFIGURATION
-// ==============================================================================
-
 const API_BASE_URL = 'https://venture-mind-production.up.railway.app';
-
 
 document.addEventListener('alpine:init', () => {
     Alpine.data('ventureMindApp', () => ({
@@ -96,6 +91,7 @@ document.addEventListener('alpine:init', () => {
             this.error = null;
             this.isLoading = true;
             const params = new URLSearchParams();
+            // FastAPI's OAuth2 form expects a 'username' field, we pass the email value to it.
             params.append('username', this.email);
             params.append('password', this.password);
 
@@ -109,7 +105,7 @@ document.addEventListener('alpine:init', () => {
                 if (!response.ok) throw new Error(data.detail || 'Login failed');
 
                 this.authToken = data.access_token;
-                this.currentUser = data.username;
+                this.currentUser = data.username; // Backend returns the actual username
                 localStorage.setItem('ventureMindToken', this.authToken);
                 localStorage.setItem('ventureMindUser', this.currentUser);
                 
@@ -141,6 +137,7 @@ document.addEventListener('alpine:init', () => {
                 if (!response.ok) throw new Error(data.detail || 'Registration failed');
                 
                 this.authView = 'login';
+                // Use the error state to show a success message on the login form
                 this.error = 'Registration successful! Please log in.';
             } catch (e) {
                 this.error = e.message;
@@ -153,6 +150,7 @@ document.addEventListener('alpine:init', () => {
             localStorage.removeItem('ventureMindToken');
             localStorage.removeItem('ventureMindUser');
             
+            // Reset state
             this.isLoggedIn = false;
             this.currentUser = null;
             this.authToken = null;
@@ -177,7 +175,7 @@ document.addEventListener('alpine:init', () => {
                 });
                 if (!response.ok) {
                     if (response.status === 401) {
-                        this.logout();
+                        this.logout(); // Token is invalid or expired
                         return;
                     }
                     throw new Error('Could not fetch history.');
@@ -192,40 +190,41 @@ document.addEventListener('alpine:init', () => {
         loadAnalysisFromHistory(analysis) {
             this.businessIdea = analysis.idea_prompt;
             this.rawMarkdown = analysis.report_markdown;
-            this.chatHistory = [];
+            this.chatHistory = []; // Reset chat when loading a new report
             this.isHistoryPanelOpen = false;
             window.scrollTo({ top: 0, behavior: 'smooth' });
             this.showNotification('Analysis loaded from history.');
         },
 
         confirmDelete(analysisId, event) {
-            event.stopPropagation();
+            event.stopPropagation(); // Prevent the click from loading the analysis
             this.itemToDelete = analysisId;
             this.showConfirmationModal = true;
         },
 
         async deleteHistoryItem() {
             if (!this.itemToDelete) return;
+
+            const deletedItemId = this.itemToDelete; // Simpan ID sebelum di-reset
+
             try {
-                const response = await fetch(`${API_BASE_URL}/analyses/${this.itemToDelete}`, {
+                const response = await fetch(`${API_BASE_URL}/analyses/${deletedItemId}`, {
                     method: 'DELETE',
                     headers: { 'Authorization': `Bearer ${this.authToken}` }
                 });
                 if (!response.ok) {
                     throw new Error('Failed to delete history item.');
                 }
-                
-                // (PERBAIKAN UX) Periksa apakah item yang dihapus sedang ditampilkan
-                const deletedAnalysis = this.analysisHistory.find(item => item.id === this.itemToDelete);
-                
-                // Hapus item dari daftar riwayat
-                this.analysisHistory = this.analysisHistory.filter(item => item.id !== this.itemToDelete);
-                
-                // Jika item yang dihapus sedang aktif, bersihkan tampilan utama
-                if (deletedAnalysis && this.businessIdea === deletedAnalysis.idea_prompt) {
+
+                // FIX [3]: Ganti filter lokal dengan fetchHistory() untuk data yang lebih akurat
+                await this.fetchHistory(); 
+
+                // FIX [4]: Cek apakah item yang dihapus adalah yang sedang ditampilkan. Jika ya, bersihkan view.
+                if (this.currentAnalysisId === deletedItemId) {
                     this.rawMarkdown = '';
                     this.businessIdea = '';
                     this.chatHistory = [];
+                    this.currentAnalysisId = null;
                 }
 
                 this.showNotification('Analysis deleted successfully.');
@@ -249,9 +248,138 @@ document.addEventListener('alpine:init', () => {
             this.liveLog = [];
             this.rawMarkdown = '';
             this.chatHistory = [];
+            this.currentAnalysisId = null; // Reset ID saat memulai analisis baru
+            
+            const success = await this.tryStreamingAnalysis();
+            
+            if (!success) {
+                console.log('Streaming failed, trying fallback method...');
+                this.showNotification('Switching to alternative method...', 'info', 2000);
+                await this.trySimpleAnalysis();
+            }
+        },
 
+        async tryStreamingAnalysis() {
+            let retryCount = 0;
+            const maxRetries = 2; 
+            
+            while (retryCount <= maxRetries) {
+                try {
+                    console.log(`Streaming attempt ${retryCount + 1}/${maxRetries + 1}`);
+                    
+                    const response = await fetch(`${API_BASE_URL}/analyze-idea-stream`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${this.authToken}`,
+                            'Cache-Control': 'no-cache'
+                        },
+                        body: JSON.stringify({
+                            idea: this.businessIdea,
+                            use_history: this.useHistory
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+
+                    if (!response.body) {
+                        throw new Error('Response body is null.');
+                    }
+
+                    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+                    let buffer = '';
+                    let lastActivity = Date.now();
+                    const timeoutDuration = 45000; 
+                    
+                    const activityTimeout = setInterval(() => {
+                        if (Date.now() - lastActivity > timeoutDuration) {
+                            console.log('Streaming timeout detected');
+                            reader.cancel();
+                            clearInterval(activityTimeout);
+                            throw new Error('Streaming timeout');
+                        }
+                    }, 5000);
+
+                    try {
+                        while (true) {
+                            const { value, done } = await reader.read();
+                            if (done) {
+                                console.log('Streaming completed normally');
+                                clearInterval(activityTimeout);
+                                // The 'completed' event below will handle the final state.
+                                return true; // Success
+                            }
+
+                            lastActivity = Date.now();
+                            buffer += value;
+                            
+                            const messages = buffer.split('\n\n');
+                            buffer = messages.pop() || '';
+                            
+                            for (const message of messages) {
+                                if (!message.trim()) continue;
+                                
+                                if (message.startsWith(':')) {
+                                    console.log('Keep-alive received');
+                                    continue;
+                                }
+                                
+                                if (message.startsWith('data:')) {
+                                    try {
+                                        const jsonData = message.substring(5).trim();
+                                        if (!jsonData) continue;
+
+                                        const data = JSON.parse(jsonData);
+                                        const shouldStop = await this.handleStreamData(data);
+                                        
+                                        if (shouldStop) {
+                                            clearInterval(activityTimeout);
+                                            return true;
+                                        }
+
+                                        if (data.type === 'error') {
+                                            throw new Error(data.message);
+                                        }
+                                        
+                                    } catch (parseError) {
+                                        console.error('JSON parse error:', parseError);
+                                    }
+                                }
+                            }
+                        }
+                    } finally {
+                        clearInterval(activityTimeout);
+                        try { reader.cancel(); } catch (e) { /* Reader may already be closed */ }
+                    }
+                    
+                } catch (error) {
+                    console.error(`Streaming attempt ${retryCount + 1} failed:`, error);
+                    
+                    if (retryCount < maxRetries && this.shouldRetryStreaming(error)) {
+                        retryCount++;
+                        this.showNotification(`Retrying connection... (${retryCount}/${maxRetries})`, 'warning', 1500);
+                        await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
+                        this.liveLog = []; 
+                        continue;
+                    } else {
+                        console.log('Streaming failed completely, will try fallback');
+                        return false; // Failed, try fallback
+                    }
+                }
+            }
+            
+            return false; 
+        },
+
+        async trySimpleAnalysis() {
             try {
-                const response = await fetch(`${API_BASE_URL}/analyze-idea-stream`, {
+                this.liveLog = [
+                    { id: 1, agent: 'Analyzing Business Idea', status: 'thinking' }
+                ];
+                
+                const response = await fetch(`${API_BASE_URL}/analyze-idea-simple`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -263,56 +391,74 @@ document.addEventListener('alpine:init', () => {
                     })
                 });
 
-                if (!response.body) throw new Error('Response body is null.');
-
-                const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-
-                    const lines = value.split('\n\n');
-                    for (const line of lines) {
-                        if (line.startsWith(':')) { // Handle heartbeats
-                            console.log('Heartbeat received.');
-                            continue;
-                        }
-
-                        if (line.startsWith('data:')) {
-                            const jsonData = line.substring(5);
-                            if (jsonData.trim() === '') continue;
-
-                            const data = JSON.parse(jsonData);
-
-                            // (PERBAIKAN UX) Logika baru untuk menangani progres dan potongan laporan
-                            switch (data.type) {
-                                case 'agent_start':
-                                    this.liveLog.push({ id: Date.now(), agent: data.agent, status: 'thinking' });
-                                    break;
-                                case 'agent_end':
-                                    const log = this.liveLog.find(l => l.agent === data.agent);
-                                    if (log) log.status = 'done';
-                                    break;
-                                case 'report_chunk':
-                                    // Rakit kembali laporan dari potongan-potongan
-                                    this.rawMarkdown += data.chunk;
-                                    break;
-                                case 'completed':
-                                    // Proses selesai, hentikan loading dan refresh riwayat
-                                    this.isLoading = false;
-                                    this.fetchHistory();
-                                    this.showNotification(data.message);
-                                    break;
-                                case 'error':
-                                    throw new Error(data.message);
-                            }
-                        }
-                    }
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Analysis failed');
                 }
-            } catch (err) {
-                this.error = `Analysis failed: ${err.message}.`;
+
+                this.liveLog[0].status = 'done';
+                this.rawMarkdown = data.result;
                 this.isLoading = false;
-                this.showNotification(this.error, 'error');
+
+                // FIX [5]: Setelah analisis selesai, fetch history lalu load hasilnya agar langsung tampil
+                await this.fetchHistory();
+                if (this.analysisHistory.length > 0) {
+                    this.loadAnalysisFromHistory(this.analysisHistory[0]);
+                }
+
+                this.showNotification('Analysis completed using backup method!');
+                
+            } catch (error) {
+                this.error = `Analysis failed: ${error.message}`;
+                this.isLoading = false;
+                this.showNotification(this.error, 'error', 5000);
+                console.error('Simple analysis failed:', error);
             }
+        },
+
+        async handleStreamData(data) {
+            switch (data.type) {
+                case 'connection_established':
+                    console.log('Stream connected');
+                    break;
+                
+                case 'agent_start':
+                    this.liveLog.push({ id: Date.now(), agent: data.agent, status: 'thinking' });
+                    break;
+                
+                case 'agent_end':
+                    const log = this.liveLog.find(l => l.agent === data.agent);
+                    if (log) log.status = 'done';
+                    break;
+
+                case 'final_result':
+                    this.rawMarkdown = data.result;
+                    break;
+
+                case 'completed':
+                    this.isLoading = false;
+                    
+                    // FIX [6]: Setelah analisis stream selesai, fetch history lalu load hasilnya agar langsung tampil
+                    await this.fetchHistory();
+                    if (this.analysisHistory.length > 0) {
+                        // Memuat analisis terbaru (yang baru saja selesai)
+                        this.loadAnalysisFromHistory(this.analysisHistory[0]);
+                    }
+
+                    this.showNotification('Analysis completed successfully!');
+                    return true; // Mengindikasikan proses selesai dan harus berhenti
+
+                case 'error':
+                    throw new Error(data.message);
+            }
+            return false; // Proses belum selesai
+        },
+
+        shouldRetryStreaming(error) {
+            const retryableErrors = ['timeout', 'connection_reset', 'network', 'fetch'];
+            const errorString = (error.message || error.toString()).toLowerCase();
+            return retryableErrors.some(keyword => errorString.includes(keyword));
         },
 
         async askFollowUp() {
