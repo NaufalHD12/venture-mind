@@ -1,3 +1,4 @@
+# Mulai dari base image Python yang ramping
 FROM python:3.12-slim
 
 # Set variabel agar proses instalasi tidak macet
@@ -13,10 +14,11 @@ RUN apt-get update && \
 # Tetapkan direktori kerja di dalam container
 WORKDIR /app
 
-COPY backend/requirements.txt .
+# (PERBAIKAN KUNCI) Salin file dari root konteks build (yaitu, dari folder backend/)
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# (PERBAIKAN KUNCI) Salin kode Python Anda dari folder backend/app
+# (PERBAIKAN KUNCI) Salin kode Python Anda dari folder app/ yang ada di dalam backend/
 COPY ./app /app/app
 
 # Perintah untuk menjalankan aplikasi menggunakan Gunicorn
