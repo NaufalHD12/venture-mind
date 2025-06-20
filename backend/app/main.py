@@ -43,9 +43,9 @@ models.Base.metadata.create_all(bind=engine)
 # Initialize the Tavily search tool for web searches
 search_tool = TavilySearchResults()
 
-# Initialize OpenAI's GPT-4.1-mini model
-gpt_4_1_mini = ChatOpenAI(
-    model="gpt-4.1-mini", 
+# (UPDATED) Initialize a single, efficient LLM to be used by all agents
+gpt_4o_mini_model = ChatOpenAI(
+    model="gpt-4o-mini", 
     temperature=0.7, 
     api_key=os.getenv("OPENAI_API_KEY")
 )
@@ -58,7 +58,7 @@ visionary_agent = Agent(
     role='Creative Product Visionary',
     goal='Develop a raw business idea into a grand, compelling vision.',
     backstory="You are a highly optimistic product visionary...",
-    llm=gpt_4_1_mini,
+    llm=gpt_4o_mini_model,
     allow_delegation=False,
     verbose=False
 )
@@ -67,7 +67,7 @@ market_analyst_agent = Agent(
     role='Data-Driven Market Analyst',
     goal='Use web search to find real-time data...',
     backstory="You are a market analyst...",
-    llm=gpt_4_1_mini,
+    llm=gpt_4o_mini_model, # (UPDATED) Standardized to gpt-4o-mini
     tools=[search_tool],
     allow_delegation=False,
     verbose=False
@@ -77,7 +77,7 @@ critic_agent = Agent(
     role='Realistic Risk Manager',
     goal='Objectively identify all weaknesses...',
     backstory="You are a meticulous and logical risk manager...",
-    llm=gpt_4_1_mini,
+    llm=gpt_4o_mini_model, # (UPDATED) Standardized to gpt-4o-mini
     allow_delegation=False,
     verbose=False
 )
@@ -86,7 +86,7 @@ planner_agent = Agent(
     role='Pragmatic Strategy Consultant',
     goal='Synthesize all information into a final report.',
     backstory='You are an expert at taking inputs from multiple sources...',
-    llm=gpt_4_1_mini,
+    llm=gpt_4o_mini_model,
     allow_delegation=False,
     verbose=False
 )
@@ -96,7 +96,7 @@ qna_agent = Agent(
     role='Creative Strategist & Follow-up Specialist',
     goal="Answer user questions and expand on ideas based on a provided report. Use your general knowledge and web search capabilities to provide creative, insightful, and forward-thinking answers.",
     backstory="You are a brilliant strategic assistant. You use a provided report as the primary context, but you are encouraged to think beyond it, add new insights, perform web searches for new information, and help the user develop their original idea further.",
-    llm=gpt_4_1_mini,
+    llm=gpt_4o_mini_model,
     tools=[search_tool],
     allow_delegation=False,
     verbose=False
