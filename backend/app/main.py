@@ -116,12 +116,12 @@ qna_agent = Agent(
 # ==============================================================================
 app = FastAPI(title="VentureMind - AI Business Idea Analyst Server")
 
-# (PERBAIKAN) Tambahkan URL frontend Anda yang sebenarnya ke daftar origins.
-# Berdasarkan log error Anda, URL frontend adalah yang DENGAN akhiran "-531d".
+# Berikan izin ke domain frontend Anda
 origins = [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
-    "https://venture-mind-production-531d.up.railway.app"
+    # Ganti dengan URL frontend Anda yang sebenarnya
+    "https://venture-mind-frontend.up.railway.app",
 ]
 
 app.add_middleware(
@@ -302,41 +302,64 @@ def generate_pdf_report(payload: ReportPayload, current_user: schemas.User = Dep
 # ==============================================================================
 async def stream_analysis_generator(idea: str, use_history: bool, db: Session, user_id: int):
     """
-    An async generator that yields Server-Sent Events (SSE) for the analysis process.
+    (FIXED) An async generator that executes each agent's task sequentially 
+    and yields progress updates to keep the connection alive.
     """
     loop = asyncio.get_running_loop()
     
+    def run_sync_task(task):
+        """Helper function to run a synchronous CrewAI task in the event loop."""
+        return task.execute()
+
     try:
         history_context = ""
         if use_history:
-            # Run synchronous DB calls in a thread pool to avoid blocking the event loop
             recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
             if recent_analyses:
                 history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
                 history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
 
-        # --- Task Definitions ---
+        # --- Task 1: Visionary ---
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': visionary_agent.role})}\n\n"
         vision_task = Task(description=f"Create a compelling vision for: '{idea}'.\n{history_context}", agent=visionary_agent, expected_output="An inspiring paragraph about the idea's potential.")
-        market_analysis_task = Task(description=f"Analyze the market for '{idea}', considering this vision: {{vision_result}}", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.", context=[vision_task])
-        critique_task = Task(description=f"Critically evaluate the idea for '{idea}', considering the vision and market analysis.", agent=critic_agent, expected_output="A bullet list of potential risks.", context=[vision_task, market_analysis_task])
+        vision_result = await loop.run_in_executor(None, run_sync_task, vision_task)
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': visionary_agent.role})}\n\n"
+        
+        # --- Task 2: Market Analyst ---
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': market_analyst_agent.role})}\n\n"
+        market_analysis_task = Task(description=f"Analyze the market for '{idea}', considering this vision: {vision_result}", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.")
+        market_result = await loop.run_in_executor(None, run_sync_task, market_analysis_task)
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': market_analyst_agent.role})}\n\n"
+
+        # --- Task 3: Critic ---
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': critic_agent.role})}\n\n"
+        critique_task = Task(description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).", agent=critic_agent, expected_output="A bullet list of potential risks.")
+        critique_result = await loop.run_in_executor(None, run_sync_task, critique_task)
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': critic_agent.role})}\n\n"
+
+        # --- Task 4: Planner ---
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': planner_agent.role})}\n\n"
         planning_task = Task(
             description=f"""
-                Synthesize all the information into a single, cohesive final report for the business idea: '{idea}'.
-                You MUST use the context from the previous tasks (vision, market analysis, critique) as the primary basis for your report.
-                Create a comprehensive report that includes a summary, the market analysis, the risks, and a final SWOT & Action Plan.
-                Structure your response with clear markdown headings.
+                Synthesize all the following information into a single, cohesive final report for the business idea: '{idea}'.
+                You MUST use the information provided below as the primary context for your report.
+
+                **Vision Provided:**
+                {vision_result}
+
+                **Market Analysis Provided:**
+                {market_result}
+
+                **Critique & Risks Provided:**
+                {critique_result}
+
+                Based on ALL of this information, create a comprehensive report that includes a summary, the market analysis, the risks, and a final SWOT & Action Plan. Structure your response with clear markdown headings.
             """,
             expected_output="A comprehensive, well-structured report in Markdown format.",
-            agent=planner_agent,
-            context=[vision_task, market_analysis_task, critique_task]
+            agent=planner_agent
         )
-        
-        # --- Crew Execution ---
-        crew = Crew(agents=[visionary_agent, market_analyst_agent, critic_agent, planner_agent], tasks=[vision_task, market_analysis_task, critique_task, planning_task], process=Process.sequential, verbose=False)
-        
-        # Using a helper to run the sync kickoff in an async context
-        # This is a simplified approach; for production, a more robust task queue might be better.
-        final_report = await loop.run_in_executor(None, crew.kickoff)
+        final_report = await loop.run_in_executor(None, run_sync_task, planning_task)
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': planner_agent.role})}\n\n"
         
         # --- Save and Stream Final Result ---
         analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
