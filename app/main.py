@@ -119,7 +119,7 @@ app = FastAPI(title="VentureMind - AI Business Idea Analyst Server")
 # Configure CORS (Cross-Origin Resource Sharing)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080", "https://nama-proyek-frontend-anda.up.railway.app"], # Allows frontend to connect
+    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080", "venture-mind-production.up.railway.app"], # Allows frontend to connect
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
