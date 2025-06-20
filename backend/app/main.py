@@ -305,7 +305,7 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
 
     # Start the two tasks concurrently
     heartbeat_task = loop.create_task(heartbeat_sender())
-    worker_task = loop.create_task(main_worker())
+    loop.create_task(main_worker())
 
     # The consumer loop that yields messages from the queue to the client
     while True:
