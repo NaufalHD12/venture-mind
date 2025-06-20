@@ -2,7 +2,7 @@
 //  GLOBAL CONFIGURATION
 // ==============================================================================
 
-const API_BASE_URL = 'venture-mind-production.up.railway.app';
+const API_BASE_URL = 'https://venture-mind-production.up.railway.app/';
 
 
 document.addEventListener('alpine:init', () => {
