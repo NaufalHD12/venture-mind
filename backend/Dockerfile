@@ -17,7 +17,7 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # (PERBAIKAN KUNCI) Salin kode Python Anda dari folder backend/app
-COPY backend/app /app/app
+COPY ./app /app/app
 
 # Perintah untuk menjalankan aplikasi menggunakan Gunicorn
 CMD [ "gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "--timeout", "400", "app.main:app" ]
