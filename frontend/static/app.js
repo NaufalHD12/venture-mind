@@ -261,22 +261,13 @@ document.addEventListener('alpine:init', () => {
                     const { value, done } = await reader.read();
                     if (done) break;
 
-                    // Handle multiple data chunks that might arrive at once
                     const lines = value.split('\n\n');
                     for (const line of lines) {
-                        // (UPDATED) Handle comment-based heartbeats from the server
-                        if (line.startsWith(':')) {
-                            console.log('Heartbeat received, connection is alive.');
-                            continue; // Abaikan dan lanjutkan
-                        }
-
                         if (line.startsWith('data:')) {
                             const jsonData = line.substring(5);
                             if (jsonData.trim() === '') continue;
 
                             const data = JSON.parse(jsonData);
-                            
-                            // (UPDATED) Logika disederhanakan untuk menangani satu "Crew" agen
                             if (data.type === 'agent_start') {
                                 this.liveLog.push({ id: Date.now(), agent: data.agent, status: 'thinking' });
                             } else if (data.type === 'agent_end') {

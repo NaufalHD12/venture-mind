@@ -5,7 +5,7 @@
 import os
 import json
 import asyncio
-from datetime import timedelta, datetime
+from datetime import timedelta
 from typing import List
 
 # --- Third-party Library Imports ---
@@ -236,87 +236,72 @@ def delete_user_analysis(analysis_id: int, current_user: schemas.User = Depends(
 # --- Feature Endpoints ---
 async def stream_analysis_generator(idea: str, use_history: bool, db: Session, user_id: int):
     """
-    (Final Heartbeat Version) This function runs two tasks concurrently:
-    1. The main analysis worker.
-    2. An independent heartbeat sender to keep the connection alive.
-    This prevents timeouts caused by long-running agent tasks.
+    Asynchronously generates analysis steps and yields them as Server-Sent Events.
     """
     loop = asyncio.get_running_loop()
-    queue = asyncio.Queue()
-    analysis_finished_event = asyncio.Event()
-
-    async def heartbeat_sender():
-        """Sends a simple comment every 15 seconds to prevent connection timeout."""
-        while not analysis_finished_event.is_set():
-            await asyncio.sleep(15)
-            if not analysis_finished_event.is_set():
-                # This is a Server-Sent Event (SSE) comment, which is ignored by the client's 'onmessage' handler
-                # but is enough to keep the connection active.
-                await queue.put(": heartbeat\n\n")
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Sent keep-alive heartbeat.")
-
-    async def main_worker():
-        """The main logic that runs tasks and puts results into the queue."""
-        try:
-            history_context = ""
-            if use_history:
-                recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
-                if recent_analyses:
-                    history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
-                    history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
-
-            # --- Task Definitions ---
-            vision_task = Task(description=f"Create a compelling vision for: '{idea}'.\n{history_context}", agent=visionary_agent, expected_output="An inspiring paragraph about the idea's potential.")
-            market_analysis_task = Task(description=f"Analyze the market for '{idea}'.", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.", context=[vision_task])
-            critique_task = Task(description=f"Critically evaluate the idea for '{idea}'.", agent=critic_agent, expected_output="A bullet list of potential risks.", context=[vision_task, market_analysis_task])
-            planning_task = Task(
-                description=f"Synthesize all information into a single, cohesive final report for the business idea: '{idea}'.",
-                expected_output="A comprehensive, well-structured report in Markdown format.",
-                agent=planner_agent,
-                context=[vision_task, market_analysis_task, critique_task]
-            )
-            
-            # --- Create and Run the Crew ---
-            crew = Crew(
-                agents=[visionary_agent, market_analyst_agent, critic_agent, planner_agent],
-                tasks=[vision_task, market_analysis_task, critique_task, planning_task],
-                process=Process.sequential,
-                verbose=False
-            )
-
-            # Start and End messages for the entire process
-            await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': 'VentureMind Crew'})}\n\n")
-            final_report = await loop.run_in_executor(None, crew.kickoff)
-            await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': 'VentureMind Crew'})}\n\n")
-            
-            # --- Save and Stream Final Result ---
-            analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
-            await loop.run_in_executor(None, crud.save_analysis, db, analysis_data, user_id)
-            await queue.put(f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n")
-            
-        except Exception as e:
-            error_message = f"An error occurred in the backend: {e}"
-            print(f"\n--- STREAMING ERROR ---\n{error_message}\n-----------------------\n")
-            await queue.put(f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n")
-        finally:
-            # Signal that the main worker is done
-            analysis_finished_event.set()
-            await queue.put(None) # Sentinel value to stop the consumer
-
-    # Start the two tasks concurrently
-    heartbeat_task = loop.create_task(heartbeat_sender())
-    loop.create_task(main_worker())
-
-    # The consumer loop that yields messages from the queue to the client
-    while True:
-        message = await queue.get()
-        if message is None:
-            # Main worker is done, stop the stream
-            break
-        yield message
     
-    # Clean up the heartbeat task
-    heartbeat_task.cancel()
+    history_context = ""
+    if use_history:
+        recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
+        if recent_analyses:
+            history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
+            history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
+
+    try:
+        # --- Task 1: Visionary ---
+        vision_task = Task(description=f"Create a compelling vision for: '{idea}'.\n{history_context}", agent=visionary_agent, expected_output="An inspiring paragraph about the idea's potential.")
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': visionary_agent.role})}\n\n"
+        vision_result = await loop.run_in_executor(None, vision_task.execute)
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': visionary_agent.role})}\n\n"
+        await asyncio.sleep(0.5)
+
+        # --- Task 2: Market Analyst (with injected context) ---
+        market_analysis_task = Task(description=f"Analyze the market for '{idea}', considering this vision: {vision_result}", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.")
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': market_analyst_agent.role})}\n\n"
+        market_result = await loop.run_in_executor(None, market_analysis_task.execute)
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': market_analyst_agent.role})}\n\n"
+        await asyncio.sleep(0.5)
+
+        # --- Task 3: Critic (with injected context) ---
+        critique_task = Task(description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).", agent=critic_agent, expected_output="A bullet list of potential risks.")
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': critic_agent.role})}\n\n"
+        critique_result = await loop.run_in_executor(None, critique_task.execute)
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': critic_agent.role})}\n\n"
+        await asyncio.sleep(0.5)
+
+        # --- Task 4: Planner (with all context explicitly injected) ---
+        planning_task = Task(
+            description=f"""
+                Synthesize all the following information into a single, cohesive final report for the business idea: '{idea}'.
+                You MUST use the information provided below as the primary context for your report.
+
+                **Vision Provided:**
+                {vision_result}
+
+                **Market Analysis Provided:**
+                {market_result}
+
+                **Critique & Risks Provided:**
+                {critique_result}
+
+                Based on ALL of this information, create a comprehensive report that includes a summary, the market analysis, the risks, and a final SWOT & Action Plan. Structure your response with clear markdown headings.
+            """,
+            expected_output="A comprehensive, well-structured report in Markdown format.",
+            agent=planner_agent
+        )
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': planner_agent.role})}\n\n"
+        final_report = await loop.run_in_executor(None, planning_task.execute)
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': planner_agent.role})}\n\n"
+        
+        # Save the relevant final report to the database
+        analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
+        await loop.run_in_executor(None, crud.save_analysis, db, analysis_data, user_id)
+
+        yield f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n"
+    except Exception as e:
+        error_message = f"An error occurred in the backend: {e}"
+        print(f"\n--- STREAMING ERROR ---\n{error_message}\n-----------------------\n")
+        yield f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n"
 
 @app.post("/analyze-idea-stream", tags=["Analysis"])
 async def analyze_business_idea_stream(request: BusinessIdea, current_user: schemas.User = Depends(get_current_user), db: Session = Depends(get_db)):
