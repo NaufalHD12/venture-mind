@@ -1,10 +1,14 @@
+# 1. Mulai dari fondasi Node.js yang ringan
 FROM node:18-alpine
-# Install server HTTP sederhana
+
+# 2. Install program web server sederhana
 RUN npm install -g http-server
-# Tetapkan direktori kerja
+
+# 3. Buat folder kerja
 WORKDIR /app
-# Salin file frontend Anda
-COPY . .
-# Ekspos port dan jalankan server
-EXPOSE 8080
-CMD [ "http-server", "-p", "8080" ]
+
+# 4. (PERBAIKAN KUNCI) Salin HANYA folder 'static' ke dalam folder kerja
+COPY ./static .
+
+# 5. Jalankan web server dari folder kerja ini
+CMD [ "http-server", "-p", "8080", "-c-1" ]
