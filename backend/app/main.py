@@ -5,20 +5,19 @@
 import os
 import json
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import List
-from starlette.responses import Response
 
 # --- Third-party Library Imports ---
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from crewai import Agent, Task
+from crewai import Agent, Task, Crew
 from langchain_openai import ChatOpenAI
 from langchain_community.tools.tavily_search import TavilySearchResults
 import markdown2
@@ -43,22 +42,23 @@ models.Base.metadata.create_all(bind=engine)
 # Initialize the Tavily search tool for web searches
 search_tool = TavilySearchResults()
 
-# Initialize OpenAI's GPT-4.1-mini model
-gpt_4_1_mini = ChatOpenAI(
+# Initialize a single, efficient LLM to be used by all agents
+llm = ChatOpenAI(
     model="gpt-4.1-mini", 
     temperature=0.7, 
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
+
 # ==============================================================================
 # 3. AI AGENT DEFINITIONS
 # ==============================================================================
-# --- Core Analysis Agents ---
+# --- Core Analysis Agents (all using the same LLM for consistency) ---
 visionary_agent = Agent(
     role='Creative Product Visionary',
     goal='Develop a raw business idea into a grand, compelling vision.',
     backstory="You are a highly optimistic product visionary...",
-    llm=gpt_4_1_mini,
+    llm=llm,
     allow_delegation=False,
     verbose=False
 )
@@ -67,7 +67,7 @@ market_analyst_agent = Agent(
     role='Data-Driven Market Analyst',
     goal='Use web search to find real-time data...',
     backstory="You are a market analyst...",
-    llm=gpt_4_1_mini,
+    llm=llm,
     tools=[search_tool],
     allow_delegation=False,
     verbose=False
@@ -77,7 +77,7 @@ critic_agent = Agent(
     role='Realistic Risk Manager',
     goal='Objectively identify all weaknesses...',
     backstory="You are a meticulous and logical risk manager...",
-    llm=gpt_4_1_mini,
+    llm=llm,
     allow_delegation=False,
     verbose=False
 )
@@ -86,7 +86,7 @@ planner_agent = Agent(
     role='Pragmatic Strategy Consultant',
     goal='Synthesize all information into a final report.',
     backstory='You are an expert at taking inputs from multiple sources...',
-    llm=gpt_4_1_mini,
+    llm=llm,
     allow_delegation=False,
     verbose=False
 )
@@ -96,7 +96,7 @@ qna_agent = Agent(
     role='Creative Strategist & Follow-up Specialist',
     goal="Answer user questions and expand on ideas based on a provided report. Use your general knowledge and web search capabilities to provide creative, insightful, and forward-thinking answers.",
     backstory="You are a brilliant strategic assistant. You use a provided report as the primary context, but you are encouraged to think beyond it, add new insights, perform web searches for new information, and help the user develop their original idea further.",
-    llm=gpt_4_1_mini,
+    llm=llm,
     tools=[search_tool],
     allow_delegation=False,
     verbose=False
@@ -112,8 +112,8 @@ app = FastAPI(title="VentureMind - AI Business Idea Analyst Server")
 origins = [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
-    "https://venture-mind-production.up.railway.app",
-    "https://venture-mind-production-531d.up.railway.app",
+    "https://venture-mind-production.up.railway.app",      # Backend URL
+    "https://venture-mind-production-531d.up.railway.app", # Frontend URL
 ]
 
 app.add_middleware(
@@ -226,28 +226,36 @@ def delete_user_analysis(analysis_id: int, current_user: schemas.User = Depends(
         raise HTTPException(status_code=404, detail="Analysis not found or you don't have permission to delete it.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-# --- Feature Endpoints (Refactored for Robust Streaming) ---
+# --- Feature Endpoints ---
 
 async def stream_analysis_generator(idea: str, use_history: bool, db: Session, user_id: int):
     """
-    Asynchronously generates analysis steps and yields them as Server-Sent Events.
-    This version uses an asyncio.Queue to decouple the blocking AI tasks from the
-    streaming response, allowing for keep-alive pings to be sent.
+    (Refactored) Asynchronously generates analysis steps and yields them as Server-Sent Events.
+    This version runs the AI tasks in a separate thread and uses a queue to communicate,
+    allowing for a separate, independent heartbeat to keep the connection alive.
     """
     loop = asyncio.get_running_loop()
     q = asyncio.Queue()
+    analysis_finished_event = asyncio.Event()
 
-    def update_callback(update_type: str, data: dict):
-        """A thread-safe way to put updates into the asyncio queue."""
-        asyncio.run_coroutine_threadsafe(q.put({"type": update_type, **data}), loop)
+    async def heartbeat_sender():
+        """Sends a simple SSE comment every 15 seconds to prevent connection timeout."""
+        while not analysis_finished_event.is_set():
+            await asyncio.sleep(15)
+            if not analysis_finished_event.is_set():
+                await q.put(": heartbeat\n\n")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Sent keep-alive heartbeat.")
 
     def crew_runner():
         """
         This function runs the blocking CrewAI tasks in a separate thread.
-        It uses the callback to post updates to the queue instead of yielding.
+        It uses a thread-safe callback to post updates to the queue.
         """
+        def update_callback(update_type: str, data: dict):
+            """A thread-safe way to put updates into the asyncio queue."""
+            asyncio.run_coroutine_threadsafe(q.put({"type": update_type, **data}), loop)
+
         try:
-            # --- History Context ---
             history_context = ""
             if use_history:
                 recent_analyses = crud.get_analyses_by_user(db, user_id)
@@ -255,42 +263,17 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
                     history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
                     history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
 
-            # --- Task 1: Visionary ---
-            vision_task = Task(description=f"Create a compelling vision for: '{idea}'.\n{history_context}", agent=visionary_agent, expected_output="An inspiring paragraph about the idea's potential.")
-            update_callback('agent_start', {'agent': visionary_agent.role})
-            vision_result = vision_task.execute()
-            update_callback('agent_end', {'agent': visionary_agent.role})
+            vision_task = Task(description=f"Create a compelling vision for: '{idea}'.\n{history_context}", agent=visionary_agent, expected_output="An inspiring paragraph.")
+            market_analysis_task = Task(description=f"Analyze the market for '{idea}'.", agent=market_analyst_agent, expected_output="A summary of market trends.", context=[vision_task])
+            critique_task = Task(description=f"Critically evaluate the idea for '{idea}'.", agent=critic_agent, expected_output="A bullet list of risks.", context=[vision_task, market_analysis_task])
+            planning_task = Task(description="Synthesize all information into a final report.", expected_output="A comprehensive report in Markdown.", agent=planner_agent, context=[vision_task, market_analysis_task, critique_task])
 
-            # --- Task 2: Market Analyst ---
-            market_analysis_task = Task(description=f"Analyze the market for '{idea}', considering this vision: {vision_result}", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.")
-            update_callback('agent_start', {'agent': market_analyst_agent.role})
-            market_result = market_analysis_task.execute()
-            update_callback('agent_end', {'agent': market_analyst_agent.role})
+            crew = Crew(agents=[visionary_agent, market_analyst_agent, critic_agent, planner_agent], tasks=[vision_task, market_analysis_task, critique_task, planning_task], verbose=False)
 
-            # --- Task 3: Critic ---
-            critique_task = Task(description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).", agent=critic_agent, expected_output="A bullet list of potential risks.")
-            update_callback('agent_start', {'agent': critic_agent.role})
-            critique_result = critique_task.execute()
-            update_callback('agent_end', {'agent': critic_agent.role})
+            update_callback('agent_start', {'agent': 'VentureMind Crew'})
+            final_report = crew.kickoff()
+            update_callback('agent_end', {'agent': 'VentureMind Crew'})
 
-            # --- Task 4: Planner ---
-            planning_task = Task(
-                description=f"""
-                    Synthesize all the following information into a single, cohesive final report for the business idea: '{idea}'.
-                    You MUST use the information provided below as the primary context for your report.
-                    **Vision Provided:** {vision_result}
-                    **Market Analysis Provided:** {market_result}
-                    **Critique & Risks Provided:** {critique_result}
-                    Based on ALL of this information, create a comprehensive report that includes a summary, the market analysis, the risks, and a final SWOT & Action Plan. Structure your response with clear markdown headings.
-                """,
-                expected_output="A comprehensive, well-structured report in Markdown format.",
-                agent=planner_agent
-            )
-            update_callback('agent_start', {'agent': planner_agent.role})
-            final_report = planning_task.execute()
-            update_callback('agent_end', {'agent': planner_agent.role})
-            
-            # --- Save to DB and send final result ---
             analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
             crud.save_analysis(db, analysis_data, user_id)
             update_callback('final_result', {'result': final_report})
@@ -300,30 +283,22 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
             print(f"\n--- STREAMING/CREW ERROR ---\n{error_message}\n-----------------------\n")
             update_callback('error', {'message': error_message})
         finally:
-            # Signal that the work is done
             asyncio.run_coroutine_threadsafe(q.put(None), loop)
 
-    # Start the blocking crew runner in a background thread
-    crew_task = loop.run_in_executor(None, crew_runner)
+    # Start the two tasks concurrently
+    main_task = loop.run_in_executor(None, crew_runner)
+    heartbeat_task = loop.create_task(heartbeat_sender())
 
-    # Loop to handle queue items and send keep-alive pings
     while True:
-        try:
-            # Wait for an item from the queue, with a 15-second timeout
-            item = await asyncio.wait_for(q.get(), timeout=15.0)
-            
-            if item is None:  # End of processing signal
-                break
-            
-            # Send the actual data event
-            yield f"data: {json.dumps(item)}\n\n"
-            q.task_done()
-        except asyncio.TimeoutError:
-            # If the queue is empty for 15s, send a comment to keep the connection alive
-            yield ": keep-alive\n\n"
-
-    # Ensure the background thread is complete before finishing
-    await crew_task
+        item = await q.get()
+        if item is None:
+            break
+        yield f"data: {json.dumps(item)}\n\n" if isinstance(item, dict) else item
+        q.task_done()
+    
+    analysis_finished_event.set()
+    await main_task
+    heartbeat_task.cancel()
 
 
 @app.post("/analyze-idea-stream", tags=["Analysis"])
@@ -335,11 +310,8 @@ async def analyze_business_idea_stream(request: BusinessIdea, current_user: sche
     return StreamingResponse(
         stream_analysis_generator(request.idea, request.use_history, db, current_user.id), 
         media_type="text/event-stream", 
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"  # Important for Nginx/proxy setups
-        })
+        headers={ "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" }
+    )
 
 @app.post("/generate-pdf", tags=["Reporting"])
 def generate_pdf(payload: ReportPayload, current_user: schemas.User = Depends(get_current_user)):
@@ -364,29 +336,19 @@ def ask_follow_up_question(query: FollowUpQuery, current_user: schemas.User = De
     try:
         full_context = query.report_context
         if query.use_history:
-            # Fetch user's history and add it to the context
             user_history = crud.get_analyses_by_user(db, user_id=current_user.id)
             if user_history:
                 history_summary = "\n\n--- PREVIOUS ANALYSIS CONTEXT ---\n"
-                for an in user_history[:2]: # Use last 2 analyses
+                for an in user_history[:2]:
                     history_summary += f"\n**Regarding '{an.idea_prompt}':**\n{an.report_markdown}\n"
                 full_context += history_summary
 
         qna_task = Task(
-            description=f"""
-                Based on the context below, answer the user's question. 
-                You are encouraged to be creative, expand on the ideas, and use your search tool if needed to find new information that can enrich the answer.
-
-                --- CONTEXT ---
-                {full_context}
-                --- END OF CONTEXT ---
-
-                User's Question: {query.question}
-            """,
-            expected_output="An insightful and helpful answer that goes beyond just summarizing the report. Provide new perspectives or actionable advice if possible.",
-            agent=qna_agent
+            description=f"Based on the context below, answer the user's question: {query.question}",
+            expected_output="An insightful and helpful answer.",
+            agent=qna_agent,
+            context=[Task(description=f"Initial report context: {full_context}", agent=qna_agent)]
         )
-        # For single-agent tasks, it's more direct to just execute the task
         answer = qna_task.execute()
         return {"answer": answer}
     except Exception as e:
