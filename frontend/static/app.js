@@ -1,10 +1,7 @@
 // ==============================================================================
 //  GLOBAL CONFIGURATION
 // ==============================================================================
-// (PERBAIKAN) Pastikan URL ini adalah URL BACKEND Anda yang sebenarnya, BUKAN frontend.
-// Berdasarkan log error Anda, URL backend adalah yang TANPA akhiran "-531d".
 const API_BASE_URL = 'https://venture-mind-production.up.railway.app';
-
 
 document.addEventListener('alpine:init', () => {
     Alpine.data('ventureMindApp', () => ({
@@ -14,7 +11,7 @@ document.addEventListener('alpine:init', () => {
         
         // --- Authentication & User State ---
         isLoggedIn: false,
-        authView: 'login', // 'login' or 'register'
+        authView: 'login',
         username: '',
         email: '',
         password: '',
@@ -49,6 +46,10 @@ document.addEventListener('alpine:init', () => {
         chatHistory: [],
         useHistoryForFollowUp: false,
 
+        // --- Streaming Control ---
+        streamingSupported: true,
+        currentStream: null,
+
         //======================================================================
         //  COMPUTED PROPERTIES
         //======================================================================
@@ -68,6 +69,26 @@ document.addEventListener('alpine:init', () => {
                 this.isLoggedIn = true;
                 this.currentUser = storedUser;
                 this.fetchHistory();
+            }
+            
+            // Test streaming support
+            this.testStreamingSupport();
+        },
+
+        //======================================================================
+        //  STREAMING SUPPORT TEST
+        //======================================================================
+
+        async testStreamingSupport() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/health`);
+                if (response.ok) {
+                    console.log('API is reachable');
+                } else {
+                    console.warn('API health check failed');
+                }
+            } catch (error) {
+                console.warn('API connection test failed:', error);
             }
         },
 
@@ -97,7 +118,6 @@ document.addEventListener('alpine:init', () => {
             this.error = null;
             this.isLoading = true;
             const params = new URLSearchParams();
-            // FastAPI's OAuth2 form expects a 'username' field, we pass the email value to it.
             params.append('username', this.email);
             params.append('password', this.password);
 
@@ -111,7 +131,7 @@ document.addEventListener('alpine:init', () => {
                 if (!response.ok) throw new Error(data.detail || 'Login failed');
 
                 this.authToken = data.access_token;
-                this.currentUser = data.username; // Backend returns the actual username
+                this.currentUser = data.username;
                 localStorage.setItem('ventureMindToken', this.authToken);
                 localStorage.setItem('ventureMindUser', this.currentUser);
                 
@@ -143,7 +163,6 @@ document.addEventListener('alpine:init', () => {
                 if (!response.ok) throw new Error(data.detail || 'Registration failed');
                 
                 this.authView = 'login';
-                // Use the error state to show a success message on the login form
                 this.error = 'Registration successful! Please log in.';
             } catch (e) {
                 this.error = e.message;
@@ -153,10 +172,15 @@ document.addEventListener('alpine:init', () => {
         },
 
         logout() {
+            // Cancel any ongoing stream
+            if (this.currentStream) {
+                this.currentStream.close();
+                this.currentStream = null;
+            }
+
             localStorage.removeItem('ventureMindToken');
             localStorage.removeItem('ventureMindUser');
             
-            // Reset state
             this.isLoggedIn = false;
             this.currentUser = null;
             this.authToken = null;
@@ -165,6 +189,8 @@ document.addEventListener('alpine:init', () => {
             this.analysisHistory = [];
             this.isHistoryPanelOpen = false;
             this.showLogoutModal = false;
+            this.liveLog = [];
+            this.isLoading = false;
             
             this.showNotification('Logged out successfully.', 'info');
         },
@@ -181,7 +207,7 @@ document.addEventListener('alpine:init', () => {
                 });
                 if (!response.ok) {
                     if (response.status === 401) {
-                        this.logout(); // Token is invalid or expired
+                        this.logout();
                         return;
                     }
                     throw new Error('Could not fetch history.');
@@ -196,14 +222,14 @@ document.addEventListener('alpine:init', () => {
         loadAnalysisFromHistory(analysis) {
             this.businessIdea = analysis.idea_prompt;
             this.rawMarkdown = analysis.report_markdown;
-            this.chatHistory = []; // Reset chat when loading a new report
+            this.chatHistory = [];
             this.isHistoryPanelOpen = false;
             window.scrollTo({ top: 0, behavior: 'smooth' });
             this.showNotification('Analysis loaded from history.');
         },
 
         confirmDelete(analysisId, event) {
-            event.stopPropagation(); // Prevent the click from loading the analysis
+            event.stopPropagation();
             this.itemToDelete = analysisId;
             this.showConfirmationModal = true;
         },
@@ -229,7 +255,7 @@ document.addEventListener('alpine:init', () => {
         },
 
         //======================================================================
-        //  CORE API CALLS (ANALYSIS, Q&A, PDF)
+        //  IMPROVED ANALYSIS METHODS WITH FALLBACK
         //======================================================================
 
         async startAnalysis() {
@@ -241,8 +267,140 @@ document.addEventListener('alpine:init', () => {
             this.rawMarkdown = '';
             this.chatHistory = [];
 
+            // Try streaming first, fallback to sync if it fails
+            const streamingWorked = await this.tryStreamingAnalysis();
+            if (!streamingWorked) {
+                await this.fallbackSyncAnalysis();
+            }
+        },
+
+        async tryStreamingAnalysis() {
             try {
+                console.log('Attempting streaming analysis...');
+                
                 const response = await fetch(`${API_BASE_URL}/analyze-idea-stream`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${this.authToken}`,
+                        'Accept': 'text/event-stream',
+                        'Cache-Control': 'no-cache'
+                    },
+                    body: JSON.stringify({
+                        idea: this.businessIdea,
+                        use_history: this.useHistory
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                if (!response.body) {
+                    throw new Error('Response body is null');
+                }
+
+                // Create EventSource-like behavior with fetch stream
+                const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+                let streamActive = true;
+                
+                this.currentStream = {
+                    close: () => {
+                        streamActive = false;
+                        reader.cancel();
+                    }
+                };
+
+                while (streamActive) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    const lines = value.split('\n\n');
+                    for (const line of lines) {
+                        if (line.startsWith('data:') && streamActive) {
+                            const jsonData = line.substring(5).trim();
+                            if (jsonData === '') continue;
+
+                            try {
+                                const data = JSON.parse(jsonData);
+                                await this.handleStreamData(data);
+                            } catch (parseError) {
+                                console.warn('Failed to parse stream data:', parseError, jsonData);
+                            }
+                        }
+                    }
+                }
+                
+                this.currentStream = null;
+                return true; // Streaming succeeded
+                
+            } catch (err) {
+                console.warn('Streaming failed:', err);
+                this.currentStream = null;
+                return false; // Streaming failed
+            }
+        },
+
+        async handleStreamData(data) {
+            switch (data.type) {
+                case 'connection_started':
+                    console.log('Stream connection established');
+                    break;
+                    
+                case 'agent_start':
+                    this.liveLog.push({ 
+                        id: Date.now(), 
+                        agent: data.agent, 
+                        status: 'thinking',
+                        message: data.message || 'Processing...'
+                    });
+                    break;
+                    
+                case 'agent_end':
+                    const log = this.liveLog.find(l => l.agent === data.agent);
+                    if (log) {
+                        log.status = 'done';
+                        log.message = data.message || 'Completed';
+                    }
+                    break;
+                    
+                case 'final_result':
+                    this.rawMarkdown = data.result;
+                    this.isLoading = false;
+                    this.fetchHistory();
+                    this.showNotification('Analysis completed successfully!');
+                    break;
+                    
+                case 'stream_complete':
+                    console.log('Stream completed successfully');
+                    break;
+                    
+                case 'stream_cancelled':
+                    console.log('Stream was cancelled');
+                    break;
+                    
+                case 'error':
+                    throw new Error(data.message || 'Stream error occurred');
+                    
+                default:
+                    console.log('Unknown stream data type:', data.type);
+            }
+        },
+
+        async fallbackSyncAnalysis() {
+            try {
+                console.log('Falling back to synchronous analysis...');
+                this.showNotification('Using alternative analysis method...', 'info');
+                
+                // Clear streaming logs and show sync message
+                this.liveLog = [{ 
+                    id: Date.now(), 
+                    agent: 'System', 
+                    status: 'thinking',
+                    message: 'Processing analysis (this may take a few minutes)...'
+                }];
+
+                const response = await fetch(`${API_BASE_URL}/analyze-idea-sync`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -254,42 +412,30 @@ document.addEventListener('alpine:init', () => {
                     })
                 });
 
-                if (!response.body) throw new Error('Response body is null.');
-
-                const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-
-                    const lines = value.split('\n\n');
-                    for (const line of lines) {
-                        if (line.startsWith('data:')) {
-                            const jsonData = line.substring(5);
-                            if (jsonData.trim() === '') continue;
-
-                            const data = JSON.parse(jsonData);
-                            if (data.type === 'agent_start') {
-                                this.liveLog.push({ id: Date.now(), agent: data.agent, status: 'thinking' });
-                            } else if (data.type === 'agent_end') {
-                                const log = this.liveLog.find(l => l.agent === data.agent);
-                                if (log) log.status = 'done';
-                            } else if (data.type === 'final_result') {
-                                this.rawMarkdown = data.result;
-                                this.isLoading = false;
-                                this.fetchHistory(); // Refresh history with the new analysis
-                                this.showNotification('Analysis completed!');
-                            } else if (data.type === 'error') {
-                                throw new Error(data.message);
-                            }
-                        }
-                    }
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Analysis failed');
                 }
+
+                // Update log to show completion
+                this.liveLog[0].status = 'done';
+                this.liveLog[0].message = 'Analysis completed successfully';
+
+                this.rawMarkdown = data.result;
+                this.fetchHistory();
+                this.showNotification('Analysis completed successfully!');
+                
             } catch (err) {
-                this.error = `Analysis failed: ${err.message}.`;
-                this.isLoading = false;
+                this.error = `Analysis failed: ${err.message}`;
                 this.showNotification(this.error, 'error');
+            } finally {
+                this.isLoading = false;
             }
         },
+
+        //======================================================================
+        //  OTHER API METHODS (UNCHANGED)
+        //======================================================================
 
         async askFollowUp() {
             if (!this.followUpQuestion.trim() || this.isAskingFollowUp) return;
