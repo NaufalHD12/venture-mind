@@ -237,7 +237,7 @@ def delete_user_analysis(analysis_id: int, current_user: schemas.User = Depends(
 async def run_task_with_heartbeat(loop, task, queue):
     """
     Runs a synchronous task in an executor and sends a heartbeat message
-    to the queue every 15 seconds to keep the connection alive.
+    to the queue every 20 seconds to keep the connection alive.
     """
     # Create a future for the long-running synchronous task
     task_future = loop.run_in_executor(None, task.execute)
@@ -245,7 +245,7 @@ async def run_task_with_heartbeat(loop, task, queue):
     while not task_future.done():
         try:
             # Wait for the task to complete, with a timeout
-            await asyncio.wait_for(asyncio.shield(task_future), timeout=15.0)
+            await asyncio.wait_for(asyncio.shield(task_future), timeout=20.0)
         except asyncio.TimeoutError:
             # If it times out, the task is still running. Send a heartbeat.
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Task for '{task.agent.role}' is still running, sending heartbeat...")
@@ -268,6 +268,7 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
         """The main logic that runs tasks and puts results/updates into the queue."""
         history_context = ""
         if use_history:
+            # Running synchronous DB calls in an executor to avoid blocking
             recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
             if recent_analyses:
                 history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
@@ -313,6 +314,17 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
         finally:
             # Signal that the producer is done
             await queue.put(None)
+
+    # Start the producer coroutine in the background
+    loop.create_task(producer())
+
+    # The consumer loop that yields messages from the queue
+    while True:
+        message = await queue.get()
+        if message is None:
+            # End of stream
+            break
+        yield message
 
     # Start the producer coroutine in the background
     loop.create_task(producer())
