@@ -261,127 +261,97 @@ document.addEventListener('alpine:init', () => {
         },
 
         async tryStreamingAnalysis() {
-            let retryCount = 0;
-            const maxRetries = 2; // Reduced retries for streaming
-            
-            while (retryCount <= maxRetries) {
-                try {
-                    console.log(`Streaming attempt ${retryCount + 1}/${maxRetries + 1}`);
-                    
-                    const response = await fetch(`${API_BASE_URL}/analyze-idea-stream`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${this.authToken}`,
-                            'Cache-Control': 'no-cache'
-                        },
-                        body: JSON.stringify({
-                            idea: this.businessIdea,
-                            use_history: this.useHistory
-                        })
-                    });
+            // FIX: Hapus logic 'while' dan 'retryCount'. Fungsi ini hanya akan mencoba sekali.
+            // Jika gagal, ia akan masuk ke blok catch dan return false,
+            // membiarkan startAnalysis() yang memutuskan untuk fallback ke metode simple.
+            try {
+                console.log('Streaming attempt: trying stream method...');
+                
+                const response = await fetch(`${API_BASE_URL}/analyze-idea-stream`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${this.authToken}`,
+                        'Cache-Control': 'no-cache'
+                    },
+                    body: JSON.stringify({
+                        idea: this.businessIdea,
+                        use_history: this.useHistory
+                    })
+                });
 
-                    if (!response.ok) {
-                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                    }
-
-                    if (!response.body) {
-                        throw new Error('Response body is null.');
-                    }
-
-                    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-                    let buffer = '';
-                    let lastActivity = Date.now();
-                    const timeoutDuration = 45000; // 45 seconds timeout for streaming
-                    
-                    const activityTimeout = setInterval(() => {
-                        if (Date.now() - lastActivity > timeoutDuration) {
-                            console.log('Streaming timeout detected');
-                            reader.cancel();
-                            clearInterval(activityTimeout);
-                            throw new Error('Streaming timeout');
-                        }
-                    }, 5000);
-
-                    try {
-                        while (true) {
-                            const { value, done } = await reader.read();
-                            if (done) {
-                                console.log('Streaming completed normally');
-                                clearInterval(activityTimeout);
-                                return true; // Success
-                            }
-
-                            lastActivity = Date.now();
-                            buffer += value;
-                            
-                            const messages = buffer.split('\n\n');
-                            buffer = messages.pop() || '';
-                            
-                            for (const message of messages) {
-                                if (!message.trim()) continue;
-                                
-                                if (message.startsWith(':')) {
-                                    console.log('Keep-alive received');
-                                    continue;
-                                }
-                                
-                                if (message.startsWith('data:')) {
-                                    try {
-                                        const jsonData = message.substring(5).trim();
-                                        if (!jsonData) continue;
-
-                                        const data = JSON.parse(jsonData);
-                                        await this.handleStreamData(data);
-                                        
-                                        if (data.type === 'final_result') {
-                                            this.rawMarkdown = data.result;
-                                        }
-                                        
-                                        if (data.type === 'completed') {
-                                            clearInterval(activityTimeout);
-                                            this.isLoading = false;
-                                            this.fetchHistory();
-                                            this.showNotification('Analysis completed successfully!');
-                                            return true; // Success
-                                        }
-                                        
-                                        if (data.type === 'error') {
-                                            throw new Error(data.message);
-                                        }
-                                        
-                                    } catch (parseError) {
-                                        console.error('JSON parse error:', parseError);
-                                    }
-                                }
-                            }
-                        }
-                    } finally {
-                        clearInterval(activityTimeout);
-                        try {
-                            reader.cancel();
-                        } catch (e) {
-                            // Reader already cancelled
-                        }
-                    }
-                    
-                } catch (error) {
-                    console.error(`Streaming attempt ${retryCount + 1} failed:`, error);
-                    
-                    if (retryCount < maxRetries && this.shouldRetryStreaming(error)) {
-                        retryCount++;
-                        this.showNotification(`Retrying connection... (${retryCount}/${maxRetries})`, 'warning', 1500);
-                        await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
-                        this.liveLog = []; // Reset log for retry
-                        continue;
-                    } else {
-                        console.log('Streaming failed completely, will try fallback');
-                        return false; // Failed, try fallback
-                    }
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
+
+                if (!response.body) {
+                    throw new Error('Response body is null.');
+                }
+
+                const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+                let buffer = '';
+                
+                // Timeout logic tetap berguna jika server hang total, bukan hanya idle
+                let lastActivity = Date.now();
+                const timeoutDuration = 60000; // 60 detik timeout aktivitas
+                const activityTimeout = setInterval(() => {
+                    if (Date.now() - lastActivity > timeoutDuration) {
+                        console.log('Streaming activity timeout detected');
+                        reader.cancel('Timeout');
+                        clearInterval(activityTimeout);
+                    }
+                }, 5000);
+
+                try {
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) {
+                            console.log('Streaming completed by the server.');
+                            clearInterval(activityTimeout);
+                            // Event 'completed' akan ditangani oleh handleStreamData
+                            return true; // Sukses
+                        }
+
+                        lastActivity = Date.now();
+                        buffer += value;
+                        
+                        const messages = buffer.split('\n\n');
+                        buffer = messages.pop() || '';
+                        
+                        for (const message of messages) {
+                            if (!message.trim()) continue;
+                            if (message.startsWith(':')) {
+                                console.log('Keep-alive ping received');
+                                continue;
+                            }
+                            if (message.startsWith('data:')) {
+                                try {
+                                    const jsonData = message.substring(5).trim();
+                                    if (!jsonData) continue;
+                                    const data = JSON.parse(jsonData);
+                                    const shouldStop = await this.handleStreamData(data);
+                                    if (shouldStop) {
+                                        clearInterval(activityTimeout);
+                                        return true; // Sukses, proses dihentikan oleh 'completed' event
+                                    }
+                                    if (data.type === 'error') throw new Error(data.message);
+                                } catch (parseError) {
+                                    console.error('JSON parse error:', parseError);
+                                }
+                            }
+                        }
+                    }
+                } finally {
+                    clearInterval(activityTimeout);
+                    // Selalu coba cancel reader untuk membersihkan resource
+                    try { reader.cancel(); } catch (e) { /* Mungkin sudah ditutup */ }
+                }
+                
+            } catch (error) {
+                console.error('Streaming method failed:', error);
+                // Gagal, kembalikan false agar startAnalysis bisa fallback
+                return false; 
             }
-            
-            return false; // All streaming attempts failed
         },
 
         async trySimpleAnalysis() {
