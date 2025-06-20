@@ -239,103 +239,39 @@ def delete_user_analysis(analysis_id: int, current_user: schemas.User = Depends(
 async def stream_analysis_generator(idea: str, use_history: bool, db: Session, user_id: int):
     """
     Asynchronously generates analysis steps and yields them as Server-Sent Events.
-    Fixed version with proper error handling and connection management.
     """
     loop = asyncio.get_running_loop()
     
+    history_context = ""
+    if use_history:
+        recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
+        if recent_analyses:
+            history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
+            history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
+
     try:
-        # Send initial connection confirmation
-        yield "data: " + json.dumps({
-            'type': 'connection_started', 
-            'message': 'Analysis stream initiated'
-        }) + "\n\n"
-        
-        # Add a small delay to ensure connection is established
-        await asyncio.sleep(0.1)
-        
-        history_context = ""
-        if use_history:
-            recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
-            if recent_analyses:
-                history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
-                history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
-
         # --- Task 1: Visionary ---
-        yield "data: " + json.dumps({
-            'type': 'agent_start', 
-            'agent': visionary_agent.role,
-            'message': 'Starting creative vision development...'
-        }) + "\n\n"
-        
-        vision_task = Task(
-            description=f"Create a compelling vision for: '{idea}'.\n{history_context}", 
-            agent=visionary_agent, 
-            expected_output="An inspiring paragraph about the idea's potential."
-        )
-        
+        vision_task = Task(description=f"Create a compelling vision for: '{idea}'.\n{history_context}", agent=visionary_agent, expected_output="An inspiring paragraph about the idea's potential.")
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': visionary_agent.role})}\n\n"
         vision_result = await loop.run_in_executor(None, vision_task.execute)
-        
-        yield "data: " + json.dumps({
-            'type': 'agent_end', 
-            'agent': visionary_agent.role,
-            'message': 'Vision development completed'
-        }) + "\n\n"
-        
-        await asyncio.sleep(0.2)  # Reduced delay
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': visionary_agent.role})}\n\n"
+        await asyncio.sleep(0.5)
 
-        # --- Task 2: Market Analyst ---
-        yield "data: " + json.dumps({
-            'type': 'agent_start', 
-            'agent': market_analyst_agent.role,
-            'message': 'Analyzing market conditions...'
-        }) + "\n\n"
-        
-        market_analysis_task = Task(
-            description=f"Analyze the market for '{idea}', considering this vision: {vision_result}", 
-            agent=market_analyst_agent, 
-            expected_output="A summary of market trends and competitors."
-        )
-        
+        # --- Task 2: Market Analyst (with injected context) ---
+        market_analysis_task = Task(description=f"Analyze the market for '{idea}', considering this vision: {vision_result}", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.")
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': market_analyst_agent.role})}\n\n"
         market_result = await loop.run_in_executor(None, market_analysis_task.execute)
-        
-        yield "data: " + json.dumps({
-            'type': 'agent_end', 
-            'agent': market_analyst_agent.role,
-            'message': 'Market analysis completed'
-        }) + "\n\n"
-        
-        await asyncio.sleep(0.2)
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': market_analyst_agent.role})}\n\n"
+        await asyncio.sleep(0.5)
 
-        # --- Task 3: Critic ---
-        yield "data: " + json.dumps({
-            'type': 'agent_start', 
-            'agent': critic_agent.role,
-            'message': 'Evaluating risks and challenges...'
-        }) + "\n\n"
-        
-        critique_task = Task(
-            description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).", 
-            agent=critic_agent, 
-            expected_output="A bullet list of potential risks."
-        )
-        
+        # --- Task 3: Critic (with injected context) ---
+        critique_task = Task(description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).", agent=critic_agent, expected_output="A bullet list of potential risks.")
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': critic_agent.role})}\n\n"
         critique_result = await loop.run_in_executor(None, critique_task.execute)
-        
-        yield "data: " + json.dumps({
-            'type': 'agent_end', 
-            'agent': critic_agent.role,
-            'message': 'Risk evaluation completed'
-        }) + "\n\n"
-        
-        await asyncio.sleep(0.2)
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': critic_agent.role})}\n\n"
+        await asyncio.sleep(0.5)
 
-        # --- Task 4: Planner ---
-        yield "data: " + json.dumps({
-            'type': 'agent_start', 
-            'agent': planner_agent.role,
-            'message': 'Synthesizing final report...'
-        }) + "\n\n"
-        
+        # --- Task 4: Planner (with all context explicitly injected) ---
         planning_task = Task(
             description=f"""
                 Synthesize all the following information into a single, cohesive final report for the business idea: '{idea}'.
@@ -355,79 +291,27 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
             expected_output="A comprehensive, well-structured report in Markdown format.",
             agent=planner_agent
         )
-        
+        yield f"data: {json.dumps({'type': 'agent_start', 'agent': planner_agent.role})}\n\n"
         final_report = await loop.run_in_executor(None, planning_task.execute)
+        yield f"data: {json.dumps({'type': 'agent_end', 'agent': planner_agent.role})}\n\n"
         
-        yield "data: " + json.dumps({
-            'type': 'agent_end', 
-            'agent': planner_agent.role,
-            'message': 'Report synthesis completed'
-        }) + "\n\n"
-        
-        # Save to database
+        # Save the relevant final report to the database
         analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
         await loop.run_in_executor(None, crud.save_analysis, db, analysis_data, user_id)
 
-        # Send final result
-        yield "data: " + json.dumps({
-            'type': 'final_result', 
-            'result': final_report,
-            'message': 'Analysis completed successfully'
-        }) + "\n\n"
-        
-        # Send completion signal
-        yield "data: " + json.dumps({
-            'type': 'stream_complete',
-            'message': 'Stream completed successfully'
-        }) + "\n\n"
-        
-    except asyncio.CancelledError:
-        print("Stream was cancelled by client")
-        yield "data: " + json.dumps({
-            'type': 'stream_cancelled',
-            'message': 'Stream was cancelled'
-        }) + "\n\n"
-        
+        yield f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n"
     except Exception as e:
-        error_message = f"Analysis error: {str(e)}"
+        error_message = f"An error occurred in the backend: {e}"
         print(f"\n--- STREAMING ERROR ---\n{error_message}\n-----------------------\n")
-        yield "data: " + json.dumps({
-            'type': 'error', 
-            'message': error_message,
-            'details': str(e)
-        }) + "\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n"
 
 @app.post("/analyze-idea-stream", tags=["Analysis"])
-async def analyze_business_idea_stream(
-    request: BusinessIdea, 
-    current_user: schemas.User = Depends(get_current_user), 
-    db: Session = Depends(get_db)
-):
+async def analyze_business_idea_stream(request: BusinessIdea, current_user: schemas.User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
     Endpoint to trigger the business idea analysis stream.
-    Fixed version with proper SSE headers and connection handling.
     """
     print(f"Analysis requested by user: {current_user.username}. Use History: {request.use_history}")
-    
-    # Create headers for proper SSE handling
-    headers = {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",  
-        "Connection": "keep-alive",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "*",
-        "X-Accel-Buffering": "no",  # Disable nginx buffering if present
-    }
-    
-    try:
-        return StreamingResponse(
-            stream_analysis_generator(request.idea, request.use_history, db, current_user.id),
-            media_type="text/event-stream",
-            headers=headers
-        )
-    except Exception as e:
-        print(f"Failed to start stream: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to start analysis stream: {str(e)}")
+    return StreamingResponse(stream_analysis_generator(request.idea, request.use_history, db, current_user.id), media_type="text/event-stream")
 
 @app.post("/generate-pdf", tags=["Reporting"])
 def generate_pdf(payload: ReportPayload, current_user: schemas.User = Depends(get_current_user)):
