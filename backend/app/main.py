@@ -6,7 +6,7 @@ import os
 import json
 import asyncio
 from datetime import timedelta
-from typing import List
+from typing import List, AsyncGenerator
 
 # --- Third-party Library Imports ---
 from dotenv import load_dotenv
@@ -234,82 +234,239 @@ def delete_user_analysis(analysis_id: int, current_user: schemas.User = Depends(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 # --- Feature Endpoints ---
-async def stream_analysis_generator(idea: str, use_history: bool, db: Session, user_id: int):
+async def stream_analysis_generator(idea: str, use_history: bool, db: Session, user_id: int) -> AsyncGenerator[str, None]:
     """
-    Asynchronously generates analysis steps and yields them as Server-Sent Events.
+    Improved streaming generator with better error handling and connection management.
     """
-    loop = asyncio.get_running_loop()
-    
-    history_context = ""
-    if use_history:
-        recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
-        if recent_analyses:
-            history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
-            history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
-
     try:
-        # --- Task 1: Visionary ---
-        vision_task = Task(description=f"Create a compelling vision for: '{idea}'.\n{history_context}", agent=visionary_agent, expected_output="An inspiring paragraph about the idea's potential.")
-        yield f"data: {json.dumps({'type': 'agent_start', 'agent': visionary_agent.role})}\n\n"
-        vision_result = await loop.run_in_executor(None, vision_task.execute)
-        yield f"data: {json.dumps({'type': 'agent_end', 'agent': visionary_agent.role})}\n\n"
-        await asyncio.sleep(0.5)
-
-        # --- Task 2: Market Analyst (with injected context) ---
-        market_analysis_task = Task(description=f"Analyze the market for '{idea}', considering this vision: {vision_result}", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.")
-        yield f"data: {json.dumps({'type': 'agent_start', 'agent': market_analyst_agent.role})}\n\n"
-        market_result = await loop.run_in_executor(None, market_analysis_task.execute)
-        yield f"data: {json.dumps({'type': 'agent_end', 'agent': market_analyst_agent.role})}\n\n"
-        await asyncio.sleep(0.5)
-
-        # --- Task 3: Critic (with injected context) ---
-        critique_task = Task(description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).", agent=critic_agent, expected_output="A bullet list of potential risks.")
-        yield f"data: {json.dumps({'type': 'agent_start', 'agent': critic_agent.role})}\n\n"
-        critique_result = await loop.run_in_executor(None, critique_task.execute)
-        yield f"data: {json.dumps({'type': 'agent_end', 'agent': critic_agent.role})}\n\n"
-        await asyncio.sleep(0.5)
-
-        # --- Task 4: Planner (with all context explicitly injected) ---
-        planning_task = Task(
-            description=f"""
-                Synthesize all the following information into a single, cohesive final report for the business idea: '{idea}'.
-                You MUST use the information provided below as the primary context for your report.
-
-                **Vision Provided:**
-                {vision_result}
-
-                **Market Analysis Provided:**
-                {market_result}
-
-                **Critique & Risks Provided:**
-                {critique_result}
-
-                Based on ALL of this information, create a comprehensive report that includes a summary, the market analysis, the risks, and a final SWOT & Action Plan. Structure your response with clear markdown headings.
-            """,
-            expected_output="A comprehensive, well-structured report in Markdown format.",
-            agent=planner_agent
-        )
-        yield f"data: {json.dumps({'type': 'agent_start', 'agent': planner_agent.role})}\n\n"
-        final_report = await loop.run_in_executor(None, planning_task.execute)
-        yield f"data: {json.dumps({'type': 'agent_end', 'agent': planner_agent.role})}\n\n"
+        # Send initial connection confirmation
+        yield f"data: {json.dumps({'type': 'connection_established', 'message': 'Analysis starting...'})}\n\n"
         
-        # Save the relevant final report to the database
-        analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
-        await loop.run_in_executor(None, crud.save_analysis, db, analysis_data, user_id)
+        # Get history context if needed
+        history_context = ""
+        if use_history:
+            try:
+                recent_analyses = await asyncio.to_thread(crud.get_analyses_by_user, db, user_id)
+                if recent_analyses:
+                    history_summary = "\n".join([
+                        f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." 
+                        for an in recent_analyses[:2]
+                    ])
+                    history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
+            except Exception as e:
+                print(f"Error fetching history: {e}")
+                # Continue without history context
 
-        yield f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n"
+        # --- Task 1: Visionary ---
+        try:
+            yield f"data: {json.dumps({'type': 'agent_start', 'agent': 'Creative Product Visionary'})}\n\n"
+            
+            vision_task = Task(
+                description=f"Create a compelling vision for: '{idea}'.\n{history_context}",
+                agent=visionary_agent,
+                expected_output="An inspiring paragraph about the idea's potential."
+            )
+            
+            vision_result = await asyncio.to_thread(vision_task.execute)
+            yield f"data: {json.dumps({'type': 'agent_end', 'agent': 'Creative Product Visionary'})}\n\n"
+            
+            # Send progress update
+            yield f"data: {json.dumps({'type': 'progress', 'step': 1, 'total': 4, 'message': 'Vision created'})}\n\n"
+            
+        except Exception as e:
+            error_msg = f"Error in vision task: {str(e)}"
+            print(error_msg)
+            yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+            return
+
+        # --- Task 2: Market Analyst ---
+        try:
+            yield f"data: {json.dumps({'type': 'agent_start', 'agent': 'Data-Driven Market Analyst'})}\n\n"
+            
+            market_analysis_task = Task(
+                description=f"Analyze the market for '{idea}', considering this vision: {vision_result}",
+                agent=market_analyst_agent,
+                expected_output="A summary of market trends and competitors."
+            )
+            
+            market_result = await asyncio.to_thread(market_analysis_task.execute)
+            yield f"data: {json.dumps({'type': 'agent_end', 'agent': 'Data-Driven Market Analyst'})}\n\n"
+            
+            # Send progress update
+            yield f"data: {json.dumps({'type': 'progress', 'step': 2, 'total': 4, 'message': 'Market analysis completed'})}\n\n"
+            
+        except Exception as e:
+            error_msg = f"Error in market analysis task: {str(e)}"
+            print(error_msg)
+            yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+            return
+
+        # --- Task 3: Critic ---
+        try:
+            yield f"data: {json.dumps({'type': 'agent_start', 'agent': 'Realistic Risk Manager'})}\n\n"
+            
+            critique_task = Task(
+                description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).",
+                agent=critic_agent,
+                expected_output="A bullet list of potential risks."
+            )
+            
+            critique_result = await asyncio.to_thread(critique_task.execute)
+            yield f"data: {json.dumps({'type': 'agent_end', 'agent': 'Realistic Risk Manager'})}\n\n"
+            
+            # Send progress update
+            yield f"data: {json.dumps({'type': 'progress', 'step': 3, 'total': 4, 'message': 'Risk analysis completed'})}\n\n"
+            
+        except Exception as e:
+            error_msg = f"Error in critique task: {str(e)}"
+            print(error_msg)
+            yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+            return
+
+        # --- Task 4: Planner ---
+        try:
+            yield f"data: {json.dumps({'type': 'agent_start', 'agent': 'Pragmatic Strategy Consultant'})}\n\n"
+            
+            planning_task = Task(
+                description=f"""
+                    Synthesize all the following information into a single, cohesive final report for the business idea: '{idea}'.
+                    You MUST use the information provided below as the primary context for your report.
+
+                    **Vision Provided:**\n{vision_result}\n
+                    **Market Analysis Provided:**\n{market_result}\n
+                    **Critique & Risks Provided:**\n{critique_result}\n
+
+                    Based on ALL of this information, create a comprehensive report that includes a summary, the market analysis, the risks, and a final SWOT & Action Plan. Structure your response with clear markdown headings.
+                """,
+                expected_output="A comprehensive, well-structured report in Markdown format.",
+                agent=planner_agent
+            )
+            
+            final_report = await asyncio.to_thread(planning_task.execute)
+            yield f"data: {json.dumps({'type': 'agent_end', 'agent': 'Pragmatic Strategy Consultant'})}\n\n"
+            
+            # Send progress update
+            yield f"data: {json.dumps({'type': 'progress', 'step': 4, 'total': 4, 'message': 'Final report generated'})}\n\n"
+            
+        except Exception as e:
+            error_msg = f"Error in planning task: {str(e)}"
+            print(error_msg)
+            yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+            return
+
+        # Save the final report to the database
+        try:
+            analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
+            await asyncio.to_thread(crud.save_analysis, db, analysis_data, user_id)
+            
+            # Send the final result
+            yield f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n"
+            yield f"data: {json.dumps({'type': 'completed', 'message': 'Analysis completed successfully!'})}\n\n"
+            
+        except Exception as e:
+            error_msg = f"Error saving analysis: {str(e)}"
+            print(error_msg)
+            yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+            return
+
     except Exception as e:
-        error_message = f"An error occurred in the backend: {e}"
+        error_message = f"Critical error in analysis pipeline: {str(e)}"
         print(f"\n--- STREAMING ERROR ---\n{error_message}\n-----------------------\n")
         yield f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n"
 
 @app.post("/analyze-idea-stream", tags=["Analysis"])
 async def analyze_business_idea_stream(request: BusinessIdea, current_user: schemas.User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
-    Endpoint to trigger the business idea analysis stream.
+    Improved streaming endpoint with better error handling and headers.
     """
     print(f"Analysis requested by user: {current_user.username}. Use History: {request.use_history}")
-    return StreamingResponse(stream_analysis_generator(request.idea, request.use_history, db, current_user.id), media_type="text/event-stream")
+    
+    # Custom headers for better streaming support
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",  # Disable nginx buffering
+    }
+    
+    return StreamingResponse(
+        stream_analysis_generator(request.idea, request.use_history, db, current_user.id),
+        media_type="text/event-stream",
+        headers=headers
+    )
+    
+@app.post("/analyze-idea-simple", tags=["Analysis"])
+async def analyze_business_idea_simple(request: BusinessIdea, current_user: schemas.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Non-streaming fallback endpoint for when streaming fails.
+    Returns the complete analysis in a single response.
+    """
+    print(f"Simple analysis requested by user: {current_user.username}. Use History: {request.use_history}")
+    
+    try:
+        # Get history context if needed
+        history_context = ""
+        if request.use_history:
+            recent_analyses = crud.get_analyses_by_user(db, user_id=current_user.id)
+            if recent_analyses:
+                history_summary = "\n".join([
+                    f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." 
+                    for an in recent_analyses[:2]
+                ])
+                history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
+
+        # Create all tasks
+        vision_task = Task(
+            description=f"Create a compelling vision for: '{request.idea}'.\n{history_context}",
+            agent=visionary_agent,
+            expected_output="An inspiring paragraph about the idea's potential."
+        )
+        
+        market_analysis_task = Task(
+            description=f"Analyze the market for '{request.idea}'. Consider the vision from the previous step.",
+            agent=market_analyst_agent,
+            expected_output="A summary of market trends and competitors."
+        )
+        
+        critique_task = Task(
+            description=f"Critically evaluate the idea for '{request.idea}'. Consider the vision and market analysis from previous steps.",
+            agent=critic_agent,
+            expected_output="A bullet list of potential risks."
+        )
+        
+        planning_task = Task(
+            description=f"""
+                Synthesize all information into a comprehensive final report for: '{request.idea}'.
+                Create a report that includes vision, market analysis, risks, and a SWOT & Action Plan.
+                Structure your response with clear markdown headings.
+            """,
+            expected_output="A comprehensive, well-structured report in Markdown format.",
+            agent=planner_agent
+        )
+
+        # Create and run the crew
+        crew = Crew(
+            agents=[visionary_agent, market_analyst_agent, critic_agent, planner_agent],
+            tasks=[vision_task, market_analysis_task, critique_task, planning_task],
+            process=Process.sequential,
+            verbose=False
+        )
+        
+        # Execute the analysis
+        final_report = crew.kickoff()
+        
+        # Save to database
+        analysis_data = schemas.AnalysisCreate(idea_prompt=request.idea, report_markdown=final_report)
+        crud.save_analysis(db=db, analysis=analysis_data, user_id=current_user.id)
+        
+        return {
+            "success": True,
+            "result": final_report,
+            "message": "Analysis completed successfully"
+        }
+        
+    except Exception as e:
+        print(f"Simple analysis error: {e}")
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 @app.post("/generate-pdf", tags=["Reporting"])
 def generate_pdf(payload: ReportPayload, current_user: schemas.User = Depends(get_current_user)):

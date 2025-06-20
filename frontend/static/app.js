@@ -239,9 +239,148 @@ document.addEventListener('alpine:init', () => {
             this.liveLog = [];
             this.rawMarkdown = '';
             this.chatHistory = [];
+            
+            // Try streaming first, then fallback to simple endpoint
+            const success = await this.tryStreamingAnalysis();
+            
+            if (!success) {
+                console.log('Streaming failed, trying fallback method...');
+                this.showNotification('Switching to alternative method...', 'info', 2000);
+                await this.trySimpleAnalysis();
+            }
+        },
 
+        async tryStreamingAnalysis() {
+            let retryCount = 0;
+            const maxRetries = 2; // Reduced retries for streaming
+            
+            while (retryCount <= maxRetries) {
+                try {
+                    console.log(`Streaming attempt ${retryCount + 1}/${maxRetries + 1}`);
+                    
+                    const response = await fetch(`${API_BASE_URL}/analyze-idea-stream`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${this.authToken}`,
+                            'Cache-Control': 'no-cache'
+                        },
+                        body: JSON.stringify({
+                            idea: this.businessIdea,
+                            use_history: this.useHistory
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+
+                    if (!response.body) {
+                        throw new Error('Response body is null.');
+                    }
+
+                    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+                    let buffer = '';
+                    let lastActivity = Date.now();
+                    const timeoutDuration = 45000; // 45 seconds timeout for streaming
+                    
+                    const activityTimeout = setInterval(() => {
+                        if (Date.now() - lastActivity > timeoutDuration) {
+                            console.log('Streaming timeout detected');
+                            reader.cancel();
+                            clearInterval(activityTimeout);
+                            throw new Error('Streaming timeout');
+                        }
+                    }, 5000);
+
+                    try {
+                        while (true) {
+                            const { value, done } = await reader.read();
+                            if (done) {
+                                console.log('Streaming completed normally');
+                                clearInterval(activityTimeout);
+                                return true; // Success
+                            }
+
+                            lastActivity = Date.now();
+                            buffer += value;
+                            
+                            const messages = buffer.split('\n\n');
+                            buffer = messages.pop() || '';
+                            
+                            for (const message of messages) {
+                                if (!message.trim()) continue;
+                                
+                                if (message.startsWith(':')) {
+                                    console.log('Keep-alive received');
+                                    continue;
+                                }
+                                
+                                if (message.startsWith('data:')) {
+                                    try {
+                                        const jsonData = message.substring(5).trim();
+                                        if (!jsonData) continue;
+
+                                        const data = JSON.parse(jsonData);
+                                        await this.handleStreamData(data);
+                                        
+                                        if (data.type === 'final_result') {
+                                            this.rawMarkdown = data.result;
+                                        }
+                                        
+                                        if (data.type === 'completed') {
+                                            clearInterval(activityTimeout);
+                                            this.isLoading = false;
+                                            this.fetchHistory();
+                                            this.showNotification('Analysis completed successfully!');
+                                            return true; // Success
+                                        }
+                                        
+                                        if (data.type === 'error') {
+                                            throw new Error(data.message);
+                                        }
+                                        
+                                    } catch (parseError) {
+                                        console.error('JSON parse error:', parseError);
+                                    }
+                                }
+                            }
+                        }
+                    } finally {
+                        clearInterval(activityTimeout);
+                        try {
+                            reader.cancel();
+                        } catch (e) {
+                            // Reader already cancelled
+                        }
+                    }
+                    
+                } catch (error) {
+                    console.error(`Streaming attempt ${retryCount + 1} failed:`, error);
+                    
+                    if (retryCount < maxRetries && this.shouldRetryStreaming(error)) {
+                        retryCount++;
+                        this.showNotification(`Retrying connection... (${retryCount}/${maxRetries})`, 'warning', 1500);
+                        await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
+                        this.liveLog = []; // Reset log for retry
+                        continue;
+                    } else {
+                        console.log('Streaming failed completely, will try fallback');
+                        return false; // Failed, try fallback
+                    }
+                }
+            }
+            
+            return false; // All streaming attempts failed
+        },
+
+        async trySimpleAnalysis() {
             try {
-                const response = await fetch(`${API_BASE_URL}/analyze-idea-stream`, {
+                this.liveLog = [
+                    { id: 1, agent: 'Analyzing Business Idea', status: 'thinking' }
+                ];
+                
+                const response = await fetch(`${API_BASE_URL}/analyze-idea-simple`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -253,41 +392,66 @@ document.addEventListener('alpine:init', () => {
                     })
                 });
 
-                if (!response.body) throw new Error('Response body is null.');
-
-                const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-
-                    const lines = value.split('\n\n');
-                    for (const line of lines) {
-                        if (line.startsWith('data:')) {
-                            const jsonData = line.substring(5);
-                            if (jsonData.trim() === '') continue;
-
-                            const data = JSON.parse(jsonData);
-                            if (data.type === 'agent_start') {
-                                this.liveLog.push({ id: Date.now(), agent: data.agent, status: 'thinking' });
-                            } else if (data.type === 'agent_end') {
-                                const log = this.liveLog.find(l => l.agent === data.agent);
-                                if (log) log.status = 'done';
-                            } else if (data.type === 'final_result') {
-                                this.rawMarkdown = data.result;
-                                this.isLoading = false;
-                                this.fetchHistory(); // Refresh history with the new analysis
-                                this.showNotification('Analysis completed!');
-                            } else if (data.type === 'error') {
-                                throw new Error(data.message);
-                            }
-                        }
-                    }
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Analysis failed');
                 }
-            } catch (err) {
-                this.error = `Analysis failed: ${err.message}.`;
+
+                // Mark as completed
+                this.liveLog[0].status = 'done';
+                this.rawMarkdown = data.result;
                 this.isLoading = false;
-                this.showNotification(this.error, 'error');
+                this.fetchHistory();
+                this.showNotification('Analysis completed using backup method!');
+                
+            } catch (error) {
+                this.error = `Analysis failed: ${error.message}`;
+                this.isLoading = false;
+                this.showNotification(this.error, 'error', 5000);
+                console.error('Simple analysis failed:', error);
             }
+        },
+
+        // Helper methods
+        async handleStreamData(data) {
+            switch (data.type) {
+                case 'connection_established':
+                    console.log('Stream connected');
+                    break;
+                    
+                case 'agent_start':
+                    this.liveLog.push({ 
+                        id: Date.now(), 
+                        agent: data.agent, 
+                        status: 'thinking' 
+                    });
+                    break;
+                    
+                case 'agent_end':
+                    const log = this.liveLog.find(l => l.agent === data.agent);
+                    if (log) log.status = 'done';
+                    break;
+                    
+                case 'progress':
+                    console.log(`Progress: ${data.step}/${data.total} - ${data.message}`);
+                    break;
+                    
+                case 'error':
+                    throw new Error(data.message);
+            }
+        },
+
+        shouldRetryStreaming(error) {
+            const retryableErrors = [
+                'timeout',
+                'connection_reset',
+                'network',
+                'fetch'
+            ];
+            
+            const errorString = (error.message || error.toString()).toLowerCase();
+            return retryableErrors.some(keyword => errorString.includes(keyword));
         },
 
         async askFollowUp() {
