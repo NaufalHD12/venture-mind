@@ -5,7 +5,7 @@
 import os
 import json
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import List, AsyncGenerator
 
 # --- Third-party Library Imports ---
@@ -42,19 +42,11 @@ models.Base.metadata.create_all(bind=engine)
 # Initialize the Tavily search tool for web searches
 search_tool = TavilySearchResults()
 
-# Initialize OpenAI's GPT-4.1-mini model for creative tasks
-gpt_4_1_mini = ChatOpenAI(
-    model="gpt-4.1-mini", 
+# (UPDATED) Initialize a SINGLE, efficient LLM to be used by all agents
+llm = ChatOpenAI(
+    model="gpt-4o-mini", 
     temperature=0.7, 
     api_key=os.getenv("OPENAI_API_KEY")
-)
-
-# Initialize DeepSeek Chat model for analytical tasks
-deepseek_chat = ChatOpenAI(
-    model="deepseek-chat", 
-    temperature=0.7, 
-    api_key=os.getenv("DEEPSEEK_API_KEY"), 
-    base_url="https://api.deepseek.com/v1"
 )
 
 
@@ -66,7 +58,7 @@ visionary_agent = Agent(
     role='Creative Product Visionary',
     goal='Develop a raw business idea into a grand, compelling vision.',
     backstory="You are a highly optimistic product visionary...",
-    llm=gpt_4_1_mini,
+    llm=llm,
     allow_delegation=False,
     verbose=False
 )
@@ -75,7 +67,7 @@ market_analyst_agent = Agent(
     role='Data-Driven Market Analyst',
     goal='Use web search to find real-time data...',
     backstory="You are a market analyst...",
-    llm=deepseek_chat,
+    llm=llm, # (UPDATED) Standardized to the single LLM instance
     tools=[search_tool],
     allow_delegation=False,
     verbose=False
@@ -85,7 +77,7 @@ critic_agent = Agent(
     role='Realistic Risk Manager',
     goal='Objectively identify all weaknesses...',
     backstory="You are a meticulous and logical risk manager...",
-    llm=deepseek_chat,
+    llm=llm, # (UPDATED) Standardized to the single LLM instance
     allow_delegation=False,
     verbose=False
 )
@@ -94,7 +86,7 @@ planner_agent = Agent(
     role='Pragmatic Strategy Consultant',
     goal='Synthesize all information into a final report.',
     backstory='You are an expert at taking inputs from multiple sources...',
-    llm=gpt_4_1_mini,
+    llm=llm,
     allow_delegation=False,
     verbose=False
 )
@@ -104,7 +96,7 @@ qna_agent = Agent(
     role='Creative Strategist & Follow-up Specialist',
     goal="Answer user questions and expand on ideas based on a provided report. Use your general knowledge and web search capabilities to provide creative, insightful, and forward-thinking answers.",
     backstory="You are a brilliant strategic assistant. You use a provided report as the primary context, but you are encouraged to think beyond it, add new insights, perform web searches for new information, and help the user develop their original idea further.",
-    llm=gpt_4_1_mini,
+    llm=llm,
     tools=[search_tool],
     allow_delegation=False,
     verbose=False
@@ -512,9 +504,10 @@ def ask_follow_up_question(query: FollowUpQuery, current_user: schemas.User = De
             expected_output="An insightful and helpful answer that goes beyond just summarizing the report. Provide new perspectives or actionable advice if possible.",
             agent=qna_agent
         )
-        qna_crew = Crew(agents=[qna_agent], tasks=[qna_task], process=Process.sequential)
-        answer = qna_crew.kickoff()
+        # For single-agent tasks, it's more direct to just execute the task
+        answer = qna_task.execute()
         return {"answer": answer}
     except Exception as e:
         print(f"Follow-up error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
