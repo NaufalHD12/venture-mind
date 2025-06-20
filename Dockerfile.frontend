@@ -1,0 +1,10 @@
+FROM node:18-alpine
+# Install server HTTP sederhana
+RUN npm install -g http-server
+# Tetapkan direktori kerja
+WORKDIR /app
+# Salin file frontend Anda
+COPY . .
+# Ekspos port dan jalankan server
+EXPOSE 8080
+CMD [ "http-server", "-p", "8080" ]
