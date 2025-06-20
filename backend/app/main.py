@@ -117,12 +117,17 @@ qna_agent = Agent(
 app = FastAPI(title="VentureMind - AI Business Idea Analyst Server")
 
 # Configure CORS (Cross-Origin Resource Sharing)
+origins = [
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "https://venture-mind-production-531d.up.railway.app"
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080", "https://venture-mind-production-531d.up.railway.app/"], # Allows frontend to connect
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
 )
 
 
