@@ -5,7 +5,7 @@
 import os
 import json
 import asyncio
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import List, AsyncGenerator
 
 # --- Third-party Library Imports ---
@@ -42,7 +42,7 @@ models.Base.metadata.create_all(bind=engine)
 # Initialize the Tavily search tool for web searches
 search_tool = TavilySearchResults()
 
-# (UPDATED) Initialize a SINGLE, efficient LLM to be used by all agents
+# Initialize a single, efficient LLM to be used by all agents
 llm = ChatOpenAI(
     model="gpt-4o-mini", 
     temperature=0.7, 
@@ -67,7 +67,7 @@ market_analyst_agent = Agent(
     role='Data-Driven Market Analyst',
     goal='Use web search to find real-time data...',
     backstory="You are a market analyst...",
-    llm=llm, # (UPDATED) Standardized to the single LLM instance
+    llm=llm,
     tools=[search_tool],
     allow_delegation=False,
     verbose=False
@@ -77,7 +77,7 @@ critic_agent = Agent(
     role='Realistic Risk Manager',
     goal='Objectively identify all weaknesses...',
     backstory="You are a meticulous and logical risk manager...",
-    llm=llm, # (UPDATED) Standardized to the single LLM instance
+    llm=llm,
     allow_delegation=False,
     verbose=False
 )
@@ -351,8 +351,14 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
             analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
             await asyncio.to_thread(crud.save_analysis, db, analysis_data, user_id)
             
-            # Send the final result
-            yield f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n"
+            # (FINAL FIX) Stream the final report in chunks
+            chunk_size = 512  # Send 512 characters at a time
+            for i in range(0, len(final_report), chunk_size):
+                chunk = final_report[i:i + chunk_size]
+                yield f"data: {json.dumps({'type': 'report_chunk', 'chunk': chunk})}\n\n"
+                await asyncio.sleep(0.01) # Small delay to allow data to be sent
+
+            # Send a final completion message
             yield f"data: {json.dumps({'type': 'completed', 'message': 'Analysis completed successfully!'})}\n\n"
             
         except Exception as e:
