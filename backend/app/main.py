@@ -232,8 +232,6 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
     This version includes a "keep-alive" ping to prevent connection resets on timeout.
     """
     loop = asyncio.get_running_loop()
-    
-    # This queue will be used to send data from the main task to the generator
     queue = asyncio.Queue()
 
     async def keep_alive_pinger():
@@ -304,31 +302,24 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
             await queue.put(None)
 
     # Start the analysis and pinger tasks
-    pinger_task = asyncio.create_task(keep_alive_pinger())
     analysis_task = asyncio.create_task(run_analysis())
+    pinger_task = asyncio.create_task(keep_alive_pinger())
 
-    while True:
-        # Wait for either task to complete or put an item in the queue
-        done, pending = await asyncio.wait(
-            [analysis_task, pinger_task, queue.get()],
-            return_when=asyncio.FIRST_COMPLETED
-        )
-
-        # Process the result from the queue
-        item = None
-        for future in done:
-            if future._coro == queue.get().__await__():
-                 item = future.result()
-                 if item is None: # End of analysis
-                     break
-                 yield item
-        
-        if item is None:
-            break
-
-    # Cleanup: cancel the pinger task as it runs in an infinite loop
-    pinger_task.cancel()
-
+    try:
+        while True:
+            # Wait for an item from the queue
+            item = await queue.get()
+            if item is None:  # A None item signals the end of the analysis
+                break
+            yield item
+    finally:
+        # Cleanup: Cancel the background tasks to ensure they don't run forever
+        if not pinger_task.done():
+            pinger_task.cancel()
+        if not analysis_task.done():
+            analysis_task.cancel()
+        # Wait for tasks to acknowledge cancellation
+        await asyncio.gather(pinger_task, analysis_task, return_exceptions=True)
 
 @app.post("/analyze-idea-stream", tags=["Analysis"])
 async def analyze_business_idea_stream(request: BusinessIdea, current_user: schemas.User = Depends(get_current_user), db: Session = Depends(get_db)):
