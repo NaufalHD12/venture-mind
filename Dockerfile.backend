@@ -4,17 +4,15 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install dependensi sistem yang dibutuhkan oleh WeasyPrint
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+# (PERBAIKAN) Gunakan pola yang lebih kuat untuk instalasi apt-get
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    # Dependensi yang dibutuhkan oleh WeasyPrint
     libpango-1.0-0 \
     libpangoft2-1.0-0 \
-    libcairo2 \
     libgdk-pixbuf2.0-0 \
-    libffi-dev \
-    libgobject-2.0-0 \
-    gobject-introspection \
-    libgirepository1.0-dev && \
+    libffi-dev && \
+    # Hapus cache apt untuk menjaga ukuran image tetap kecil
     rm -rf /var/lib/apt/lists/*
 
 # Tetapkan direktori kerja di dalam container
