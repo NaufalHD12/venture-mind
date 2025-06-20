@@ -50,15 +50,6 @@ gpt_4_1_mini = ChatOpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
-# Initialize DeepSeek Chat model for analytical tasks
-deepseek_chat = ChatOpenAI(
-    model="deepseek-chat", 
-    temperature=0.7, 
-    api_key=os.getenv("DEEPSEEK_API_KEY"), 
-    base_url="https://api.deepseek.com/v1"
-)
-
-
 # ==============================================================================
 # 3. AI AGENT DEFINITIONS
 # ==============================================================================
@@ -76,7 +67,7 @@ market_analyst_agent = Agent(
     role='Data-Driven Market Analyst',
     goal='Use web search to find real-time data...',
     backstory="You are a market analyst...",
-    llm=deepseek_chat,
+    llm=gpt_4_1_mini,
     tools=[search_tool],
     allow_delegation=False,
     verbose=False
@@ -86,7 +77,7 @@ critic_agent = Agent(
     role='Realistic Risk Manager',
     goal='Objectively identify all weaknesses...',
     backstory="You are a meticulous and logical risk manager...",
-    llm=deepseek_chat,
+    llm=gpt_4_1_mini,
     allow_delegation=False,
     verbose=False
 )
