@@ -5,7 +5,7 @@
 import os
 import json
 import asyncio
-from datetime import timedelta
+from datetime import timedelta, datetime
 from typing import List
 
 # --- Third-party Library Imports ---
@@ -234,74 +234,96 @@ def delete_user_analysis(analysis_id: int, current_user: schemas.User = Depends(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 # --- Feature Endpoints ---
+async def run_task_with_heartbeat(loop, task, queue):
+    """
+    Runs a synchronous task in an executor and sends a heartbeat message
+    to the queue every 15 seconds to keep the connection alive.
+    """
+    # Create a future for the long-running synchronous task
+    task_future = loop.run_in_executor(None, task.execute)
+    
+    while not task_future.done():
+        try:
+            # Wait for the task to complete, with a timeout
+            await asyncio.wait_for(asyncio.shield(task_future), timeout=15.0)
+        except asyncio.TimeoutError:
+            # If it times out, the task is still running. Send a heartbeat.
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Task for '{task.agent.role}' is still running, sending heartbeat...")
+            await queue.put(f"data: {json.dumps({'type': 'heartbeat', 'agent': task.agent.role})}\n\n")
+
+    # Once the loop is finished, the task is done. Return the result.
+    return task_future.result()
+
+
 async def stream_analysis_generator(idea: str, use_history: bool, db: Session, user_id: int):
     """
-    (Original Version) Asynchronously generates analysis steps and yields them as Server-Sent Events.
+    (Heartbeat Version) Asynchronously generates analysis steps and yields them as Server-Sent Events,
+    with a heartbeat mechanism for long-running tasks.
     """
     loop = asyncio.get_running_loop()
-    
-    history_context = ""
-    if use_history:
-        recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
-        if recent_analyses:
-            history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
-            history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
+    # Queue for inter-coroutine communication
+    queue = asyncio.Queue()
 
-    try:
-        # --- Task 1: Visionary ---
-        vision_task = Task(description=f"Create a compelling vision for: '{idea}'.\n{history_context}", agent=visionary_agent, expected_output="An inspiring paragraph about the idea's potential.")
-        yield f"data: {json.dumps({'type': 'agent_start', 'agent': visionary_agent.role})}\n\n"
-        vision_result = await loop.run_in_executor(None, vision_task.execute)
-        yield f"data: {json.dumps({'type': 'agent_end', 'agent': visionary_agent.role})}\n\n"
-        await asyncio.sleep(0.5)
+    async def producer():
+        """The main logic that runs tasks and puts results/updates into the queue."""
+        history_context = ""
+        if use_history:
+            recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
+            if recent_analyses:
+                history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
+                history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
 
-        # --- Task 2: Market Analyst (with injected context) ---
-        market_analysis_task = Task(description=f"Analyze the market for '{idea}', considering this vision: {vision_result}", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.")
-        yield f"data: {json.dumps({'type': 'agent_start', 'agent': market_analyst_agent.role})}\n\n"
-        market_result = await loop.run_in_executor(None, market_analysis_task.execute)
-        yield f"data: {json.dumps({'type': 'agent_end', 'agent': market_analyst_agent.role})}\n\n"
-        await asyncio.sleep(0.5)
+        try:
+            # --- Task 1: Visionary ---
+            await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': visionary_agent.role})}\n\n")
+            vision_task = Task(description=f"Create a compelling vision for: '{idea}'.\n{history_context}", agent=visionary_agent, expected_output="An inspiring paragraph about the idea's potential.")
+            vision_result = await run_task_with_heartbeat(loop, vision_task, queue)
+            await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': visionary_agent.role})}\n\n")
 
-        # --- Task 3: Critic (with injected context) ---
-        critique_task = Task(description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).", agent=critic_agent, expected_output="A bullet list of potential risks.")
-        yield f"data: {json.dumps({'type': 'agent_start', 'agent': critic_agent.role})}\n\n"
-        critique_result = await loop.run_in_executor(None, critique_task.execute)
-        yield f"data: {json.dumps({'type': 'agent_end', 'agent': critic_agent.role})}\n\n"
-        await asyncio.sleep(0.5)
+            # --- Task 2: Market Analyst ---
+            await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': market_analyst_agent.role})}\n\n")
+            market_analysis_task = Task(description=f"Analyze the market for '{idea}', considering this vision: {vision_result}", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.")
+            market_result = await run_task_with_heartbeat(loop, market_analysis_task, queue)
+            await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': market_analyst_agent.role})}\n\n")
 
-        # --- Task 4: Planner (with all context explicitly injected) ---
-        planning_task = Task(
-            description=f"""
-                Synthesize all the following information into a single, cohesive final report for the business idea: '{idea}'.
-                You MUST use the information provided below as the primary context for your report.
+            # --- Task 3: Critic ---
+            await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': critic_agent.role})}\n\n")
+            critique_task = Task(description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).", agent=critic_agent, expected_output="A bullet list of potential risks.")
+            critique_result = await run_task_with_heartbeat(loop, critique_task, queue)
+            await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': critic_agent.role})}\n\n")
 
-                **Vision Provided:**
-                {vision_result}
+            # --- Task 4: Planner ---
+            await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': planner_agent.role})}\n\n")
+            planning_task = Task(
+                description=f"""Synthesize all the following information into a single, cohesive final report for the business idea: '{idea}'. You MUST use the information provided below as the primary context for your report.\n\n**Vision Provided:**\n{vision_result}\n\n**Market Analysis Provided:**\n{market_result}\n\n**Critique & Risks Provided:**\n{critique_result}\n\nBased on ALL of this information, create a comprehensive report.""",
+                expected_output="A comprehensive, well-structured report in Markdown format.",
+                agent=planner_agent
+            )
+            final_report = await run_task_with_heartbeat(loop, planning_task, queue)
+            await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': planner_agent.role})}\n\n")
+            
+            analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
+            await loop.run_in_executor(None, crud.save_analysis, db, analysis_data, user_id)
 
-                **Market Analysis Provided:**
-                {market_result}
+            await queue.put(f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n")
+        except Exception as e:
+            error_message = f"An error occurred in the backend: {e}"
+            print(f"\n--- STREAMING ERROR ---\n{error_message}\n-----------------------\n")
+            await queue.put(f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n")
+        finally:
+            # Signal that the producer is done
+            await queue.put(None)
 
-                **Critique & Risks Provided:**
-                {critique_result}
+    # Start the producer coroutine in the background
+    loop.create_task(producer())
 
-                Based on ALL of this information, create a comprehensive report that includes a summary, the market analysis, the risks, and a final SWOT & Action Plan. Structure your response with clear markdown headings.
-            """,
-            expected_output="A comprehensive, well-structured report in Markdown format.",
-            agent=planner_agent
-        )
-        yield f"data: {json.dumps({'type': 'agent_start', 'agent': planner_agent.role})}\n\n"
-        final_report = await loop.run_in_executor(None, planning_task.execute)
-        yield f"data: {json.dumps({'type': 'agent_end', 'agent': planner_agent.role})}\n\n"
-        
-        # Save the relevant final report to the database
-        analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
-        await loop.run_in_executor(None, crud.save_analysis, db, analysis_data, user_id)
-
-        yield f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n"
-    except Exception as e:
-        error_message = f"An error occurred in the backend: {e}"
-        print(f"\n--- STREAMING ERROR ---\n{error_message}\n-----------------------\n")
-        yield f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n"
+    # The consumer loop that yields messages from the queue
+    while True:
+        message = await queue.get()
+        if message is None:
+            # End of stream
+            break
+        yield message
 
 @app.post("/analyze-idea-stream", tags=["Analysis"])
 async def analyze_business_idea_stream(request: BusinessIdea, current_user: schemas.User = Depends(get_current_user), db: Session = Depends(get_db)):
