@@ -231,7 +231,6 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
     Asynchronously generates analysis steps and yields them as Server-Sent Events.
     This version includes a "keep-alive" ping to prevent connection resets on timeout.
     """
-    loop = asyncio.get_running_loop()
     queue = asyncio.Queue()
 
     async def keep_alive_pinger():
@@ -243,30 +242,31 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
     async def run_analysis():
         """The main analysis logic, which puts results into the queue."""
         history_context = ""
-        if use_history:
-            # Running synchronous DB call in an executor
-            recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
-            if recent_analyses:
-                history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
-                history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
-
         try:
+            if use_history:
+                # Running synchronous DB call in a separate thread
+                recent_analyses = await asyncio.to_thread(crud.get_analyses_by_user, db, user_id)
+                if recent_analyses:
+                    history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
+                    history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
+
             # --- Task 1: Visionary ---
             vision_task = Task(description=f"Create a compelling vision for: '{idea}'.\n{history_context}", agent=visionary_agent, expected_output="An inspiring paragraph about the idea's potential.")
             await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': visionary_agent.role})}\n\n")
-            vision_result = await loop.run_in_executor(None, vision_task.execute)
+            # (PERBAIKAN) Menggunakan asyncio.to_thread untuk menjalankan tugas CrewAI yang sinkron
+            vision_result = await asyncio.to_thread(vision_task.execute)
             await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': visionary_agent.role})}\n\n")
             
             # --- Task 2: Market Analyst ---
             market_analysis_task = Task(description=f"Analyze the market for '{idea}', considering this vision: {vision_result}", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.")
             await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': market_analyst_agent.role})}\n\n")
-            market_result = await loop.run_in_executor(None, market_analysis_task.execute)
+            market_result = await asyncio.to_thread(market_analysis_task.execute)
             await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': market_analyst_agent.role})}\n\n")
 
             # --- Task 3: Critic ---
             critique_task = Task(description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).", agent=critic_agent, expected_output="A bullet list of potential risks.")
             await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': critic_agent.role})}\n\n")
-            critique_result = await loop.run_in_executor(None, critique_task.execute)
+            critique_result = await asyncio.to_thread(critique_task.execute)
             await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': critic_agent.role})}\n\n")
 
             # --- Task 4: Planner ---
@@ -285,12 +285,12 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
                 agent=planner_agent
             )
             await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': planner_agent.role})}\n\n")
-            final_report = await loop.run_in_executor(None, planning_task.execute)
+            final_report = await asyncio.to_thread(planning_task.execute)
             await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': planner_agent.role})}\n\n")
             
             # Save the final report to the database
             analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
-            await loop.run_in_executor(None, crud.save_analysis, db, analysis_data, user_id)
+            await asyncio.to_thread(crud.save_analysis, db, analysis_data, user_id)
 
             await queue.put(f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n")
         except Exception as e:
