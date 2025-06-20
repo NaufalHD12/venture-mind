@@ -6,7 +6,7 @@
   },
   "deploy": {
     "startCommand": "gunicorn -w 2 -k uvicorn.workers.UvicornWorker --timeout 400 app.main:app",
-    "healthcheckPath": "/",
+    "healthcheckPath": "/docs",
     "healthcheckTimeout": 100
   }
 }
