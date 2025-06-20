@@ -121,7 +121,7 @@ origins = [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
     # Ganti dengan URL frontend Anda yang sebenarnya
-    "https://venture-mind-frontend.up.railway.app",
+    "https://venture-mind-production-531d.up.railway.app",
 ]
 
 app.add_middleware(
