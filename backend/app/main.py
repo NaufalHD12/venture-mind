@@ -236,7 +236,7 @@ def delete_user_analysis(analysis_id: int, current_user: schemas.User = Depends(
 # --- Feature Endpoints ---
 async def stream_analysis_generator(idea: str, use_history: bool, db: Session, user_id: int):
     """
-    Asynchronously generates analysis steps and yields them as Server-Sent Events.
+    (Original Version) Asynchronously generates analysis steps and yields them as Server-Sent Events.
     """
     loop = asyncio.get_running_loop()
     
