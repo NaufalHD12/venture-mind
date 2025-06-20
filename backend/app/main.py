@@ -44,7 +44,7 @@ search_tool = TavilySearchResults()
 
 # (UPDATED) Initialize a SINGLE, efficient LLM to be used by all agents
 llm = ChatOpenAI(
-    model="gpt-4.1-mini", 
+    model="gpt-4o-mini", 
     temperature=0.7, 
     api_key=os.getenv("OPENAI_API_KEY")
 )
