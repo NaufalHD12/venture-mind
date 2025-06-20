@@ -43,12 +43,14 @@ models.Base.metadata.create_all(bind=engine)
 # Initialize the Tavily search tool for web searches
 search_tool = TavilySearchResults()
 
-# (UPDATED) Initialize a single, efficient LLM to be used by all agents
+# Initialize OpenAI's GPT-4.1-mini model for creative tasks
+# (This will now be used for all agents)
 gpt_4o_mini_model = ChatOpenAI(
     model="gpt-4o-mini", 
     temperature=0.7, 
     api_key=os.getenv("OPENAI_API_KEY")
 )
+
 
 # ==============================================================================
 # 3. AI AGENT DEFINITIONS
@@ -67,7 +69,7 @@ market_analyst_agent = Agent(
     role='Data-Driven Market Analyst',
     goal='Use web search to find real-time data...',
     backstory="You are a market analyst...",
-    llm=gpt_4o_mini_model, # (UPDATED) Standardized to gpt-4o-mini
+    llm=gpt_4o_mini_model, # (UPDATED) Using gpt-4o-mini
     tools=[search_tool],
     allow_delegation=False,
     verbose=False
@@ -77,7 +79,7 @@ critic_agent = Agent(
     role='Realistic Risk Manager',
     goal='Objectively identify all weaknesses...',
     backstory="You are a meticulous and logical risk manager...",
-    llm=gpt_4o_mini_model, # (UPDATED) Standardized to gpt-4o-mini
+    llm=gpt_4o_mini_model, # (UPDATED) Using gpt-4o-mini
     allow_delegation=False,
     verbose=False
 )
