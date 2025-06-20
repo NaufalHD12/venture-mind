@@ -268,7 +268,13 @@ document.addEventListener('alpine:init', () => {
                             if (jsonData.trim() === '') continue;
 
                             const data = JSON.parse(jsonData);
-                            if (data.type === 'agent_start') {
+                            // (PERBAIKAN KUNCI) Tambahkan penanganan untuk pesan 'heartbeat'
+                            if (data.type === 'heartbeat') {
+                                console.log(`Heartbeat received for agent: ${data.agent}`);
+                                // Tidak perlu melakukan apa-apa, cukup lanjutkan loop untuk menjaga koneksi
+                                continue; 
+                            }
+                            else if (data.type === 'agent_start') {
                                 this.liveLog.push({ id: Date.now(), agent: data.agent, status: 'thinking' });
                             } else if (data.type === 'agent_end') {
                                 const log = this.liveLog.find(l => l.agent === data.agent);
