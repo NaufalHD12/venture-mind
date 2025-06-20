@@ -1,8 +1,9 @@
 // ==============================================================================
 //  GLOBAL CONFIGURATION
 // ==============================================================================
-
-const API_BASE_URL = 'https://venture-mind-production.up.railway.app/';
+// (PERBAIKAN) Pastikan URL ini adalah URL BACKEND Anda yang sebenarnya, BUKAN frontend.
+// Berdasarkan log error Anda, URL backend adalah yang TANPA akhiran "-531d".
+const API_BASE_URL = 'https://venture-mind-production.up.railway.app';
 
 
 document.addEventListener('alpine:init', () => {

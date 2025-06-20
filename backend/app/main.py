@@ -116,7 +116,8 @@ qna_agent = Agent(
 # ==============================================================================
 app = FastAPI(title="VentureMind - AI Business Idea Analyst Server")
 
-# Configure CORS (Cross-Origin Resource Sharing)
+# (PERBAIKAN) Tambahkan URL frontend Anda yang sebenarnya ke daftar origins.
+# Berdasarkan log error Anda, URL frontend adalah yang DENGAN akhiran "-531d".
 origins = [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
@@ -128,6 +129,7 @@ app.add_middleware(
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
