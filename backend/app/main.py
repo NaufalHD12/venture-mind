@@ -302,7 +302,7 @@ def generate_pdf_report(payload: ReportPayload, current_user: schemas.User = Dep
 # ==============================================================================
 async def stream_analysis_generator(idea: str, use_history: bool, db: Session, user_id: int):
     """
-    (FIXED) An async generator that executes each agent's task sequentially 
+    An async generator that executes each agent's task sequentially 
     and yields progress updates to keep the connection alive.
     """
     loop = asyncio.get_running_loop()
@@ -371,3 +371,4 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
         error_message = f"An error occurred in the backend: {e}"
         print(f"\n--- STREAMING ERROR ---\n{error_message}\n-----------------------\n")
         yield f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n"
+
