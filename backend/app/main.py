@@ -43,9 +43,9 @@ models.Base.metadata.create_all(bind=engine)
 # Initialize the Tavily search tool for web searches
 search_tool = TavilySearchResults()
 
-# Initialize OpenAI's GPT-4.1-mini model for creative tasks
+# Initialize OpenAI's GPT-4.1-mini model
 gpt_4_1_mini = ChatOpenAI(
-    model="gpt-4o-mini", 
+    model="gpt-4.1-mini", 
     temperature=0.7, 
     api_key=os.getenv("OPENAI_API_KEY")
 )
