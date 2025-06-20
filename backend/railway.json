@@ -4,7 +4,7 @@
     "builder": "DOCKERFILE"
   },
   "deploy": {
-    "startCommand": "gunicorn -w 1 -k uvicorn.workers.UvicornWorker --timeout 400 app.main:app",
+    "startCommand": "gunicorn -w 2 -k uvicorn.workers.UvicornWorker --timeout 400 app.main:app",
     "healthcheckPath": "/docs",
     "healthcheckTimeout": 100
   }

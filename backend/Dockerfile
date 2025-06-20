@@ -22,4 +22,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY ./app /app/app
 
 # Perintah untuk menjalankan aplikasi menggunakan Gunicorn
-CMD [ "gunicorn", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "--timeout", "400", "app.main:app" ]
+CMD [ "gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "--timeout", "400", "app.main:app" ]
