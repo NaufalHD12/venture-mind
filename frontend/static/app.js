@@ -1,14 +1,14 @@
 // ==============================================================================
-//  GLOBAL CONFIGURATION
+//  GLOBAL CONFIGURATION
 // ==============================================================================
-// Pastikan URL ini adalah URL BACKEND Anda yang sebenarnya.
+
 const API_BASE_URL = 'https://venture-mind-production.up.railway.app';
 
 
 document.addEventListener('alpine:init', () => {
     Alpine.data('ventureMindApp', () => ({
         //======================================================================
-        //  STATE MANAGEMENT
+        //  STATE MANAGEMENT
         //======================================================================
         
         // --- Authentication & User State ---
@@ -49,7 +49,7 @@ document.addEventListener('alpine:init', () => {
         useHistoryForFollowUp: false,
 
         //======================================================================
-        //  COMPUTED PROPERTIES
+        //  COMPUTED PROPERTIES
         //======================================================================
 
         get resultsReady() {
@@ -57,7 +57,7 @@ document.addEventListener('alpine:init', () => {
         },
 
         //======================================================================
-        //  LIFECYCLE & INITIALIZATION
+        //  LIFECYCLE & INITIALIZATION
         //======================================================================
 
         init() {
@@ -71,7 +71,7 @@ document.addEventListener('alpine:init', () => {
         },
 
         //======================================================================
-        //  UI & NOTIFICATION METHODS
+        //  UI & NOTIFICATION METHODS
         //======================================================================
 
         showNotification(message, type = 'success', duration = 3000) {
@@ -89,7 +89,7 @@ document.addEventListener('alpine:init', () => {
         },
 
         //======================================================================
-        //  AUTHENTICATION METHODS
+        //  AUTHENTICATION METHODS
         //======================================================================
 
         async login() {
@@ -169,7 +169,7 @@ document.addEventListener('alpine:init', () => {
         },
 
         //======================================================================
-        //  HISTORY & ANALYSIS MANAGEMENT
+        //  HISTORY & ANALYSIS MANAGEMENT
         //======================================================================
         
         async fetchHistory() {
@@ -228,7 +228,7 @@ document.addEventListener('alpine:init', () => {
         },
 
         //======================================================================
-        //  CORE API CALLS (ANALYSIS, Q&A, PDF)
+        //  CORE API CALLS (ANALYSIS, Q&A, PDF)
         //======================================================================
 
         async startAnalysis() {
@@ -262,14 +262,6 @@ document.addEventListener('alpine:init', () => {
 
                     const lines = value.split('\n\n');
                     for (const line of lines) {
-                        // (PERUBAHAN) Menangani pesan keep-alive dari backend.
-                        // Backend mengirimkan komentar ": keep-alive" setiap 15 detik
-                        // untuk menjaga koneksi tetap terbuka. Kita harus mengabaikannya.
-                        if (line.startsWith(':')) {
-                            console.log('Received keep-alive ping, ignoring.');
-                            continue; // Lanjut ke baris berikutnya, jangan proses lebih lanjut.
-                        }
-                        
                         if (line.startsWith('data:')) {
                             const jsonData = line.substring(5);
                             if (jsonData.trim() === '') continue;
