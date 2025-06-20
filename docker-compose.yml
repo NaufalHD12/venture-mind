@@ -1,0 +1,34 @@
+# Docker Compose file for setting up the PostgreSQL database
+
+version: '3.8'
+
+services:
+  # This defines the PostgreSQL database service
+  db:
+    # Use the official PostgreSQL image, version 15 is a good stable choice
+    image: postgres:15
+    
+    # This ensures the database container restarts if it crashes
+    restart: always
+    
+    # Environment variables to configure the database
+    # IMPORTANT: Change 'your_strong_password' to a secure password
+    environment:
+      POSTGRES_USER: naufalhd12
+      POSTGRES_PASSWORD: "Nouzen_123"
+      POSTGRES_DB: venturemind_db
+      
+    # This maps the port inside the container (5432) to a port on your computer (5432)
+    # This allows your FastAPI backend to connect to the database via localhost:5432
+    ports:
+      - "5432:5432"
+      
+    # This is crucial for data persistence. It creates a volume named 'postgres_data'
+    # on your host machine to store the database files. Without this, all your
+    # data would be lost every time you stop the container.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+# This defines the named volume used by the service above
+volumes:
+  postgres_data:

@@ -1,0 +1,190 @@
+/*================================================
+  1. GLOBAL STYLES & RESETS
+================================================*/
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #0f172a; /* slate-900 */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Hide elements managed by Alpine.js initially */
+[x-cloak] {
+    display: none !important;
+}
+
+/*================================================
+  2. SCROLLBAR STYLING
+================================================*/
+
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #1e293b; /* slate-800 */
+}
+
+::-webkit-scrollbar-thumb {
+    background: #334155; /* slate-700 */
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #475569; /* slate-600 */
+}
+
+/*================================================
+  3. COMPONENT STYLES
+================================================*/
+
+/* --- Card --- */
+.card {
+    background: linear-gradient(145deg, #1e293b, #1e293b); /* slate-800 */
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.2);
+}
+
+/* --- Input Field --- */
+.input-field {
+    background: rgba(15, 23, 42, 0.5); /* slate-900 with opacity */
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    transition: all 0.2s ease;
+}
+
+.input-field:focus {
+    border-color: #38bdf8; /* sky-400 */
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+}
+
+/* --- Primary Button --- */
+.btn-primary {
+    background: linear-gradient(135deg, #0ea5e9, #0284c7); /* sky-500 to sky-600 */
+    box-shadow: 0 4px 6px rgba(2, 132, 199, 0.2);
+    transition: all 0.2s ease;
+}
+
+.btn-primary:hover {
+    background: linear-gradient(135deg, #0284c7, #0369a1); /* sky-600 to sky-700 */
+    transform: translateY(-1px);
+    box-shadow: 0 6px 8px rgba(2, 132, 199, 0.3);
+}
+
+.btn-primary:active {
+    transform: translateY(0);
+}
+
+/* --- Chat Bubbles --- */
+.chat-bubble-user {
+    background: linear-gradient(135deg, #0ea5e9, #0284c7); /* sky-500 to sky-600 */
+    border-radius: 18px 18px 4px 18px;
+}
+
+.chat-bubble-ai {
+    background: linear-gradient(135deg, #334155, #1e293b); /* slate-700 to slate-800 */
+    border-radius: 18px 18px 18px 4px;
+}
+
+/* --- Toast Notifications --- */
+.toast {
+    position: fixed;
+    top: 1.5rem;
+    right: 1.5rem;
+    padding: 1rem 1.5rem;
+    border-radius: 0.75rem;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.2);
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    max-width: 350px;
+}
+
+.toast.success {
+    border-left: 4px solid #10b981; /* emerald-500 */
+}
+
+.toast.error {
+    border-left: 4px solid #ef4444; /* red-500 */
+}
+
+.toast.info {
+    border-left: 4px solid #0ea5e9; /* sky-500 */
+}
+
+.toast .icon {
+    margin-right: 0.75rem;
+    flex-shrink: 0;
+}
+
+
+/*================================================
+  4. TYPOGRAPHY & TEXT STYLES
+================================================*/
+
+/* --- Prose (Generated Markdown Content) --- */
+.prose h1,
+.prose h2,
+.prose h3 {
+    font-weight: 700;
+    margin-top: 1.5em;
+    margin-bottom: 0.75em;
+    padding-bottom: 0.3em;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.prose p {
+    line-height: 1.75;
+}
+
+.prose ul {
+    list-style-type: disc;
+    padding-left: 1.5em;
+    margin-bottom: 1em;
+}
+
+.prose li {
+    margin-bottom: 0.5em;
+}
+
+.prose strong {
+    color: #f8fafc; /* slate-50 */
+}
+
+/* --- Chat Prose (Spacing Fixes for Chat Bubbles) --- */
+.chat-prose p:first-child,
+.chat-prose ul:first-child {
+    margin-top: 0;
+}
+
+.chat-prose p:last-child,
+.chat-prose ul:last-child {
+    margin-bottom: 0;
+}
+
+/* --- Gradient Text Utility --- */
+.gradient-text {
+    background: linear-gradient(90deg, #38bdf8, #818cf8); /* sky-400 to indigo-400 */
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+
+/*================================================
+  5. UTILITY CLASSES
+================================================*/
+
+/* --- Glassmorphism Effect --- */
+.glass {
+    background: rgba(15, 23, 42, 0.7); /* slate-900 with opacity */
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* --- Smooth Transition Helper --- */
+.transition-all-smooth {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
