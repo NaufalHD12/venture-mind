@@ -228,14 +228,13 @@ def delete_user_analysis(analysis_id: int, current_user: schemas.User = Depends(
 # --- Feature Endpoints ---
 async def stream_analysis_generator(idea: str, use_history: bool, db: Session, user_id: int) -> AsyncGenerator[str, None]:
     """
-    Generator streaming yang telah diperbaiki dengan mekanisme keep-alive ping
-    untuk mencegah timeout dari proxy.
+    Improved streaming generator with better error handling and connection management.
     """
     try:
-        # Kirim konfirmasi koneksi awal
+        # Send initial connection confirmation
         yield f"data: {json.dumps({'type': 'connection_established', 'message': 'Analysis starting...'})}\n\n"
         
-        # Ambil konteks history jika diperlukan
+        # Get history context if needed
         history_context = ""
         if use_history:
             try:
@@ -248,34 +247,24 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
                     history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
             except Exception as e:
                 print(f"Error fetching history: {e}")
-                # Lanjutkan tanpa konteks history
-
-        # --- Helper function untuk menjalankan task dengan pinger ---
-        async def run_task_with_pinger(task_to_run):
-            # FIX: Jalankan tugas berat di background task
-            task_future = asyncio.create_task(asyncio.to_thread(task_to_run.execute))
-            
-            # FIX: Sementara task berjalan, kirim ping setiap 15 detik
-            while not task_future.done():
-                yield ": ping\n\n"
-                await asyncio.sleep(15)
-            
-            # FIX: Setelah selesai, kembalikan hasilnya
-            return await task_future
+                # Continue without history context
 
         # --- Task 1: Visionary ---
         try:
             yield f"data: {json.dumps({'type': 'agent_start', 'agent': 'Creative Product Visionary'})}\n\n"
+            
             vision_task = Task(
                 description=f"Create a compelling vision for: '{idea}'.\n{history_context}",
                 agent=visionary_agent,
                 expected_output="An inspiring paragraph about the idea's potential."
             )
-            # FIX: Gunakan helper untuk menjalankan task dengan pinger
-            vision_result = await run_task_with_pinger(vision_task)
             
+            vision_result = await asyncio.to_thread(vision_task.execute)
             yield f"data: {json.dumps({'type': 'agent_end', 'agent': 'Creative Product Visionary'})}\n\n"
+            
+            # Send progress update
             yield f"data: {json.dumps({'type': 'progress', 'step': 1, 'total': 4, 'message': 'Vision created'})}\n\n"
+            
         except Exception as e:
             error_msg = f"Error in vision task: {str(e)}"
             print(error_msg)
@@ -285,16 +274,19 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
         # --- Task 2: Market Analyst ---
         try:
             yield f"data: {json.dumps({'type': 'agent_start', 'agent': 'Data-Driven Market Analyst'})}\n\n"
+            
             market_analysis_task = Task(
                 description=f"Analyze the market for '{idea}', considering this vision: {vision_result}",
                 agent=market_analyst_agent,
                 expected_output="A summary of market trends and competitors."
             )
-            # FIX: Gunakan helper yang sama
-            market_result = await run_task_with_pinger(market_analysis_task)
-
+            
+            market_result = await asyncio.to_thread(market_analysis_task.execute)
             yield f"data: {json.dumps({'type': 'agent_end', 'agent': 'Data-Driven Market Analyst'})}\n\n"
+            
+            # Send progress update
             yield f"data: {json.dumps({'type': 'progress', 'step': 2, 'total': 4, 'message': 'Market analysis completed'})}\n\n"
+            
         except Exception as e:
             error_msg = f"Error in market analysis task: {str(e)}"
             print(error_msg)
@@ -304,16 +296,19 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
         # --- Task 3: Critic ---
         try:
             yield f"data: {json.dumps({'type': 'agent_start', 'agent': 'Realistic Risk Manager'})}\n\n"
+            
             critique_task = Task(
                 description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).",
                 agent=critic_agent,
                 expected_output="A bullet list of potential risks."
             )
-            # FIX: Gunakan helper yang sama
-            critique_result = await run_task_with_pinger(critique_task)
             
+            critique_result = await asyncio.to_thread(critique_task.execute)
             yield f"data: {json.dumps({'type': 'agent_end', 'agent': 'Realistic Risk Manager'})}\n\n"
+            
+            # Send progress update
             yield f"data: {json.dumps({'type': 'progress', 'step': 3, 'total': 4, 'message': 'Risk analysis completed'})}\n\n"
+            
         except Exception as e:
             error_msg = f"Error in critique task: {str(e)}"
             print(error_msg)
@@ -323,6 +318,7 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
         # --- Task 4: Planner ---
         try:
             yield f"data: {json.dumps({'type': 'agent_start', 'agent': 'Pragmatic Strategy Consultant'})}\n\n"
+            
             planning_task = Task(
                 description=f"""
                     Synthesize all the following information into a single, cohesive final report for the business idea: '{idea}'.
@@ -337,30 +333,34 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
                 expected_output="A comprehensive, well-structured report in Markdown format.",
                 agent=planner_agent
             )
-            # FIX: Gunakan helper yang sama
-            final_report = await run_task_with_pinger(planning_task)
             
+            final_report = await asyncio.to_thread(planning_task.execute)
             yield f"data: {json.dumps({'type': 'agent_end', 'agent': 'Pragmatic Strategy Consultant'})}\n\n"
+            
+            # Send progress update
             yield f"data: {json.dumps({'type': 'progress', 'step': 4, 'total': 4, 'message': 'Final report generated'})}\n\n"
+            
         except Exception as e:
             error_msg = f"Error in planning task: {str(e)}"
             print(error_msg)
             yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
             return
 
-        # --- Finalisasi dan Penyimpanan ---
+        # Save the final report to the database
         try:
-            # Simpan laporan final ke database
             analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
             await asyncio.to_thread(crud.save_analysis, db, analysis_data, user_id)
             
-            # FIX: Kirim laporan final ke frontend dalam satu event 'final_result'
-            # Ini cocok dengan logika frontend yang sudah kita perbaiki sebelumnya.
-            yield f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n"
-            await asyncio.sleep(0.01) # Beri waktu untuk flush
+            # (FINAL FIX) Stream the final report in chunks
+            chunk_size = 512  # Send 512 characters at a time
+            for i in range(0, len(final_report), chunk_size):
+                chunk = final_report[i:i + chunk_size]
+                yield f"data: {json.dumps({'type': 'report_chunk', 'chunk': chunk})}\n\n"
+                await asyncio.sleep(0.01) # Small delay to allow data to be sent
 
-            # Kirim pesan penyelesaian akhir
+            # Send a final completion message
             yield f"data: {json.dumps({'type': 'completed', 'message': 'Analysis completed successfully!'})}\n\n"
+            
         except Exception as e:
             error_msg = f"Error saving analysis: {str(e)}"
             print(error_msg)
@@ -372,15 +372,18 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
         print(f"\n--- STREAMING ERROR ---\n{error_message}\n-----------------------\n")
         yield f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n"
 
-# Endpoint Anda tidak perlu diubah, sudah bagus.
 @app.post("/analyze-idea-stream", tags=["Analysis"])
 async def analyze_business_idea_stream(request: BusinessIdea, current_user: schemas.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Improved streaming endpoint with better error handling and headers.
+    """
     print(f"Analysis requested by user: {current_user.username}. Use History: {request.use_history}")
     
+    # Custom headers for better streaming support
     headers = {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
-        "X-Accel-Buffering": "no",  # Header ini sangat bagus untuk Nginx
+        "X-Accel-Buffering": "no",  # Disable nginx buffering
     }
     
     return StreamingResponse(
