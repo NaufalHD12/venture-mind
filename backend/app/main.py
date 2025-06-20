@@ -121,6 +121,7 @@ app = FastAPI(title="VentureMind - AI Business Idea Analyst Server")
 origins = [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
+    "https://venture-mind-production.up.railway.app",
     "https://venture-mind-production-531d.up.railway.app",
 ]
 
@@ -340,7 +341,14 @@ async def analyze_business_idea_stream(request: BusinessIdea, current_user: sche
     Endpoint to trigger the business idea analysis stream.
     """
     print(f"Analysis requested by user: {current_user.username}. Use History: {request.use_history}")
-    return StreamingResponse(stream_analysis_generator(request.idea, request.use_history, db, current_user.id), media_type="text/event-stream")
+    return StreamingResponse(
+        stream_analysis_generator(request.idea, request.use_history, db, current_user.id), 
+        media_type="text/event-stream", 
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Important for Nginx/proxy setups
+        })
 
 @app.post("/generate-pdf", tags=["Reporting"])
 def generate_pdf(payload: ReportPayload, current_user: schemas.User = Depends(get_current_user)):
