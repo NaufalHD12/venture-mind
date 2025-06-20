@@ -5,7 +5,7 @@
 import os
 import json
 import asyncio
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import List, AsyncGenerator
 
 # --- Third-party Library Imports ---
@@ -351,8 +351,14 @@ async def stream_analysis_generator(idea: str, use_history: bool, db: Session, u
             analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
             await asyncio.to_thread(crud.save_analysis, db, analysis_data, user_id)
             
-            # Send the final result
-            yield f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n"
+            # (FINAL FIX) Stream the final report in chunks
+            chunk_size = 512  # Send 512 characters at a time
+            for i in range(0, len(final_report), chunk_size):
+                chunk = final_report[i:i + chunk_size]
+                yield f"data: {json.dumps({'type': 'report_chunk', 'chunk': chunk})}\n\n"
+                await asyncio.sleep(0.01) # Small delay to allow data to be sent
+
+            # Send a final completion message
             yield f"data: {json.dumps({'type': 'completed', 'message': 'Analysis completed successfully!'})}\n\n"
             
         except Exception as e:
