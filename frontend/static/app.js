@@ -1,5 +1,6 @@
 const API_BASE_URL = 'https://venture-mind-production.up.railway.app';
 
+
 document.addEventListener('alpine:init', () => {
     Alpine.data('ventureMindApp', () => ({
         //======================================================================
@@ -248,8 +249,8 @@ document.addEventListener('alpine:init', () => {
             this.liveLog = [];
             this.rawMarkdown = '';
             this.chatHistory = [];
-            this.currentAnalysisId = null; // Reset ID saat memulai analisis baru
             
+            // Try streaming first, then fallback to simple endpoint
             const success = await this.tryStreamingAnalysis();
             
             if (!success) {
@@ -261,7 +262,7 @@ document.addEventListener('alpine:init', () => {
 
         async tryStreamingAnalysis() {
             let retryCount = 0;
-            const maxRetries = 2; 
+            const maxRetries = 2; // Reduced retries for streaming
             
             while (retryCount <= maxRetries) {
                 try {
@@ -291,7 +292,7 @@ document.addEventListener('alpine:init', () => {
                     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
                     let buffer = '';
                     let lastActivity = Date.now();
-                    const timeoutDuration = 45000; 
+                    const timeoutDuration = 45000; // 45 seconds timeout for streaming
                     
                     const activityTimeout = setInterval(() => {
                         if (Date.now() - lastActivity > timeoutDuration) {
@@ -308,7 +309,6 @@ document.addEventListener('alpine:init', () => {
                             if (done) {
                                 console.log('Streaming completed normally');
                                 clearInterval(activityTimeout);
-                                // The 'completed' event below will handle the final state.
                                 return true; // Success
                             }
 
@@ -332,13 +332,20 @@ document.addEventListener('alpine:init', () => {
                                         if (!jsonData) continue;
 
                                         const data = JSON.parse(jsonData);
-                                        const shouldStop = await this.handleStreamData(data);
+                                        await this.handleStreamData(data);
                                         
-                                        if (shouldStop) {
-                                            clearInterval(activityTimeout);
-                                            return true;
+                                        if (data.type === 'final_result') {
+                                            this.rawMarkdown = data.result;
                                         }
-
+                                        
+                                        if (data.type === 'completed') {
+                                            clearInterval(activityTimeout);
+                                            this.isLoading = false;
+                                            this.fetchHistory();
+                                            this.showNotification('Analysis completed successfully!');
+                                            return true; // Success
+                                        }
+                                        
                                         if (data.type === 'error') {
                                             throw new Error(data.message);
                                         }
@@ -351,7 +358,11 @@ document.addEventListener('alpine:init', () => {
                         }
                     } finally {
                         clearInterval(activityTimeout);
-                        try { reader.cancel(); } catch (e) { /* Reader may already be closed */ }
+                        try {
+                            reader.cancel();
+                        } catch (e) {
+                            // Reader already cancelled
+                        }
                     }
                     
                 } catch (error) {
@@ -361,7 +372,7 @@ document.addEventListener('alpine:init', () => {
                         retryCount++;
                         this.showNotification(`Retrying connection... (${retryCount}/${maxRetries})`, 'warning', 1500);
                         await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
-                        this.liveLog = []; 
+                        this.liveLog = []; // Reset log for retry
                         continue;
                     } else {
                         console.log('Streaming failed completely, will try fallback');
@@ -370,7 +381,7 @@ document.addEventListener('alpine:init', () => {
                 }
             }
             
-            return false; 
+            return false; // All streaming attempts failed
         },
 
         async trySimpleAnalysis() {
@@ -397,16 +408,11 @@ document.addEventListener('alpine:init', () => {
                     throw new Error(data.detail || 'Analysis failed');
                 }
 
+                // Mark as completed
                 this.liveLog[0].status = 'done';
                 this.rawMarkdown = data.result;
                 this.isLoading = false;
-
-                // FIX [5]: Setelah analisis selesai, fetch history lalu load hasilnya agar langsung tampil
-                await this.fetchHistory();
-                if (this.analysisHistory.length > 0) {
-                    this.loadAnalysisFromHistory(this.analysisHistory[0]);
-                }
-
+                this.fetchHistory();
                 this.showNotification('Analysis completed using backup method!');
                 
             } catch (error) {
@@ -417,46 +423,43 @@ document.addEventListener('alpine:init', () => {
             }
         },
 
+        // Helper methods
         async handleStreamData(data) {
             switch (data.type) {
                 case 'connection_established':
                     console.log('Stream connected');
                     break;
-                
+                    
                 case 'agent_start':
-                    this.liveLog.push({ id: Date.now(), agent: data.agent, status: 'thinking' });
+                    this.liveLog.push({ 
+                        id: Date.now(), 
+                        agent: data.agent, 
+                        status: 'thinking' 
+                    });
                     break;
-                
+                    
                 case 'agent_end':
                     const log = this.liveLog.find(l => l.agent === data.agent);
                     if (log) log.status = 'done';
                     break;
-
-                case 'final_result':
-                    this.rawMarkdown = data.result;
-                    break;
-
-                case 'completed':
-                    this.isLoading = false;
                     
-                    // FIX [6]: Setelah analisis stream selesai, fetch history lalu load hasilnya agar langsung tampil
-                    await this.fetchHistory();
-                    if (this.analysisHistory.length > 0) {
-                        // Memuat analisis terbaru (yang baru saja selesai)
-                        this.loadAnalysisFromHistory(this.analysisHistory[0]);
-                    }
-
-                    this.showNotification('Analysis completed successfully!');
-                    return true; // Mengindikasikan proses selesai dan harus berhenti
-
+                case 'progress':
+                    console.log(`Progress: ${data.step}/${data.total} - ${data.message}`);
+                    break;
+                    
                 case 'error':
                     throw new Error(data.message);
             }
-            return false; // Proses belum selesai
         },
 
         shouldRetryStreaming(error) {
-            const retryableErrors = ['timeout', 'connection_reset', 'network', 'fetch'];
+            const retryableErrors = [
+                'timeout',
+                'connection_reset',
+                'network',
+                'fetch'
+            ];
+            
             const errorString = (error.message || error.toString()).toLowerCase();
             return retryableErrors.some(keyword => errorString.includes(keyword));
         },
