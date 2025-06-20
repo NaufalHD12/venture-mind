@@ -234,108 +234,89 @@ def delete_user_analysis(analysis_id: int, current_user: schemas.User = Depends(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 # --- Feature Endpoints ---
-async def run_task_with_heartbeat(loop, task, queue):
-    """
-    Runs a synchronous task in an executor and sends a heartbeat message
-    to the queue every 20 seconds to keep the connection alive.
-    """
-    # Create a future for the long-running synchronous task
-    task_future = loop.run_in_executor(None, task.execute)
-    
-    while not task_future.done():
-        try:
-            # Wait for the task to complete, with a timeout
-            await asyncio.wait_for(asyncio.shield(task_future), timeout=20.0)
-        except asyncio.TimeoutError:
-            # If it times out, the task is still running. Send a heartbeat.
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Task for '{task.agent.role}' is still running, sending heartbeat...")
-            await queue.put(f"data: {json.dumps({'type': 'heartbeat', 'agent': task.agent.role})}\n\n")
-
-    # Once the loop is finished, the task is done. Return the result.
-    return task_future.result()
-
-
 async def stream_analysis_generator(idea: str, use_history: bool, db: Session, user_id: int):
     """
-    (Heartbeat Version) Asynchronously generates analysis steps and yields them as Server-Sent Events,
-    with a heartbeat mechanism for long-running tasks.
+    (Final Heartbeat Version) This function runs two tasks concurrently:
+    1. The main analysis worker.
+    2. An independent heartbeat sender to keep the connection alive.
+    This prevents timeouts caused by long-running agent tasks.
     """
     loop = asyncio.get_running_loop()
-    # Queue for inter-coroutine communication
     queue = asyncio.Queue()
+    analysis_finished_event = asyncio.Event()
 
-    async def producer():
-        """The main logic that runs tasks and puts results/updates into the queue."""
-        history_context = ""
-        if use_history:
-            # Running synchronous DB calls in an executor to avoid blocking
-            recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
-            if recent_analyses:
-                history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
-                history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
+    async def heartbeat_sender():
+        """Sends a simple comment every 15 seconds to prevent connection timeout."""
+        while not analysis_finished_event.is_set():
+            await asyncio.sleep(15)
+            if not analysis_finished_event.is_set():
+                # This is a Server-Sent Event (SSE) comment, which is ignored by the client's 'onmessage' handler
+                # but is enough to keep the connection active.
+                await queue.put(": heartbeat\n\n")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Sent keep-alive heartbeat.")
 
+    async def main_worker():
+        """The main logic that runs tasks and puts results into the queue."""
         try:
-            # --- Task 1: Visionary ---
-            await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': visionary_agent.role})}\n\n")
+            history_context = ""
+            if use_history:
+                recent_analyses = await loop.run_in_executor(None, crud.get_analyses_by_user, db, user_id)
+                if recent_analyses:
+                    history_summary = "\n".join([f"- Idea: '{an.idea_prompt}'. Key finding: {an.report_markdown[:150]}..." for an in recent_analyses[:2]])
+                    history_context = f"For context, this user has previously analyzed:\n{history_summary}\nKeep these past analyses in mind when creating the new vision."
+
+            # --- Task Definitions ---
             vision_task = Task(description=f"Create a compelling vision for: '{idea}'.\n{history_context}", agent=visionary_agent, expected_output="An inspiring paragraph about the idea's potential.")
-            vision_result = await run_task_with_heartbeat(loop, vision_task, queue)
-            await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': visionary_agent.role})}\n\n")
-
-            # --- Task 2: Market Analyst ---
-            await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': market_analyst_agent.role})}\n\n")
-            market_analysis_task = Task(description=f"Analyze the market for '{idea}', considering this vision: {vision_result}", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.")
-            market_result = await run_task_with_heartbeat(loop, market_analysis_task, queue)
-            await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': market_analyst_agent.role})}\n\n")
-
-            # --- Task 3: Critic ---
-            await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': critic_agent.role})}\n\n")
-            critique_task = Task(description=f"Critically evaluate the idea for '{idea}', considering the vision ({vision_result}) and market analysis ({market_result}).", agent=critic_agent, expected_output="A bullet list of potential risks.")
-            critique_result = await run_task_with_heartbeat(loop, critique_task, queue)
-            await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': critic_agent.role})}\n\n")
-
-            # --- Task 4: Planner ---
-            await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': planner_agent.role})}\n\n")
+            market_analysis_task = Task(description=f"Analyze the market for '{idea}'.", agent=market_analyst_agent, expected_output="A summary of market trends and competitors.", context=[vision_task])
+            critique_task = Task(description=f"Critically evaluate the idea for '{idea}'.", agent=critic_agent, expected_output="A bullet list of potential risks.", context=[vision_task, market_analysis_task])
             planning_task = Task(
-                description=f"""Synthesize all the following information into a single, cohesive final report for the business idea: '{idea}'. You MUST use the information provided below as the primary context for your report.\n\n**Vision Provided:**\n{vision_result}\n\n**Market Analysis Provided:**\n{market_result}\n\n**Critique & Risks Provided:**\n{critique_result}\n\nBased on ALL of this information, create a comprehensive report.""",
+                description=f"Synthesize all information into a single, cohesive final report for the business idea: '{idea}'.",
                 expected_output="A comprehensive, well-structured report in Markdown format.",
-                agent=planner_agent
+                agent=planner_agent,
+                context=[vision_task, market_analysis_task, critique_task]
             )
-            final_report = await run_task_with_heartbeat(loop, planning_task, queue)
-            await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': planner_agent.role})}\n\n")
             
+            # --- Create and Run the Crew ---
+            crew = Crew(
+                agents=[visionary_agent, market_analyst_agent, critic_agent, planner_agent],
+                tasks=[vision_task, market_analysis_task, critique_task, planning_task],
+                process=Process.sequential,
+                verbose=False
+            )
+
+            # Start and End messages for the entire process
+            await queue.put(f"data: {json.dumps({'type': 'agent_start', 'agent': 'VentureMind Crew'})}\n\n")
+            final_report = await loop.run_in_executor(None, crew.kickoff)
+            await queue.put(f"data: {json.dumps({'type': 'agent_end', 'agent': 'VentureMind Crew'})}\n\n")
+            
+            # --- Save and Stream Final Result ---
             analysis_data = schemas.AnalysisCreate(idea_prompt=idea, report_markdown=final_report)
             await loop.run_in_executor(None, crud.save_analysis, db, analysis_data, user_id)
-
             await queue.put(f"data: {json.dumps({'type': 'final_result', 'result': final_report})}\n\n")
+            
         except Exception as e:
             error_message = f"An error occurred in the backend: {e}"
             print(f"\n--- STREAMING ERROR ---\n{error_message}\n-----------------------\n")
             await queue.put(f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n")
         finally:
-            # Signal that the producer is done
-            await queue.put(None)
+            # Signal that the main worker is done
+            analysis_finished_event.set()
+            await queue.put(None) # Sentinel value to stop the consumer
 
-    # Start the producer coroutine in the background
-    loop.create_task(producer())
+    # Start the two tasks concurrently
+    heartbeat_task = loop.create_task(heartbeat_sender())
+    worker_task = loop.create_task(main_worker())
 
-    # The consumer loop that yields messages from the queue
+    # The consumer loop that yields messages from the queue to the client
     while True:
         message = await queue.get()
         if message is None:
-            # End of stream
+            # Main worker is done, stop the stream
             break
         yield message
-
-    # Start the producer coroutine in the background
-    loop.create_task(producer())
-
-    # The consumer loop that yields messages from the queue
-    while True:
-        message = await queue.get()
-        if message is None:
-            # End of stream
-            break
-        yield message
+    
+    # Clean up the heartbeat task
+    heartbeat_task.cancel()
 
 @app.post("/analyze-idea-stream", tags=["Analysis"])
 async def analyze_business_idea_stream(request: BusinessIdea, current_user: schemas.User = Depends(get_current_user), db: Session = Depends(get_db)):
