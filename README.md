@@ -10,7 +10,7 @@
 > *Click the button above to try the live application.*
 
 
-[![Demo Video](https://img.youtube.com/vi/YT_ID/0.jpg)](https://youtu.be/YT_ID/)
+[![Demo Video](https://img.youtube.com/vi/6tnLxhZDisA/0.jpg)](https://youtu.be/6tnLxhZDisA)
 
 > *Click the image above for a video walkthrough on YouTube.*
 
