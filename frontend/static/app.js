@@ -23,6 +23,7 @@ document.addEventListener('alpine:init', () => {
         error: null,
         liveLog: [],
         rawMarkdown: '',
+        currentAnalysisId: null,
 
         // --- UI & Component State ---
         isHistoryPanelOpen: false,
@@ -206,7 +207,7 @@ document.addEventListener('alpine:init', () => {
         async deleteHistoryItem() {
             if (!this.itemToDelete) return;
 
-            const deletedItemId = this.itemToDelete; // Simpan ID sebelum di-reset
+            const deletedItemId = this.itemToDelete;
 
             try {
                 const response = await fetch(`${API_BASE_URL}/analyses/${deletedItemId}`, {
@@ -217,18 +218,32 @@ document.addEventListener('alpine:init', () => {
                     throw new Error('Failed to delete history item.');
                 }
 
-                // FIX [3]: Ganti filter lokal dengan fetchHistory() untuk data yang lebih akurat
+                // Refresh history data
                 await this.fetchHistory(); 
 
-                // FIX [4]: Cek apakah item yang dihapus adalah yang sedang ditampilkan. Jika ya, bersihkan view.
-                if (this.currentAnalysisId === deletedItemId) {
+                // Check if the deleted item is currently displayed
+                const currentAnalysis = this.analysisHistory.find(
+                    analysis => analysis.id === deletedItemId
+                );
+                
+                // If the currently displayed analysis was deleted, clear the view
+                if (currentAnalysis && 
+                    (this.businessIdea === currentAnalysis.idea_prompt || 
+                    this.rawMarkdown === currentAnalysis.report_markdown)) {
                     this.rawMarkdown = '';
                     this.businessIdea = '';
                     this.chatHistory = [];
-                    this.currentAnalysisId = null;
+                    this.showNotification('Deleted analysis was cleared from view.');
                 }
 
                 this.showNotification('Analysis deleted successfully.');
+                
+                // Force a small UI refresh
+                this.$nextTick(() => {
+                    // This ensures the UI updates properly
+                    console.log('UI refreshed after deletion');
+                });
+
             } catch (e) {
                 this.showNotification(e.message, 'error');
             } finally {
@@ -261,9 +276,6 @@ document.addEventListener('alpine:init', () => {
         },
 
         async tryStreamingAnalysis() {
-            // FIX: Hapus logic 'while' dan 'retryCount'. Fungsi ini hanya akan mencoba sekali.
-            // Jika gagal, ia akan masuk ke blok catch dan return false,
-            // membiarkan startAnalysis() yang memutuskan untuk fallback ke metode simple.
             try {
                 console.log('Streaming attempt: trying stream method...');
                 
@@ -291,9 +303,8 @@ document.addEventListener('alpine:init', () => {
                 const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
                 let buffer = '';
                 
-                // Timeout logic tetap berguna jika server hang total, bukan hanya idle
                 let lastActivity = Date.now();
-                const timeoutDuration = 60000; // 60 detik timeout aktivitas
+                const timeoutDuration = 60000; // 60 seconds
                 const activityTimeout = setInterval(() => {
                     if (Date.now() - lastActivity > timeoutDuration) {
                         console.log('Streaming activity timeout detected');
@@ -308,8 +319,15 @@ document.addEventListener('alpine:init', () => {
                         if (done) {
                             console.log('Streaming completed by the server.');
                             clearInterval(activityTimeout);
-                            // Event 'completed' akan ditangani oleh handleStreamData
-                            return true; // Sukses
+                            
+                            // If we have markdown content but didn't get a completion event,
+                            // handle it here
+                            if (this.rawMarkdown && this.isLoading) {
+                                this.isLoading = false;
+                                this.fetchHistory();
+                                this.showNotification('Analysis completed!');
+                            }
+                            return true;
                         }
 
                         lastActivity = Date.now();
@@ -332,7 +350,7 @@ document.addEventListener('alpine:init', () => {
                                     const shouldStop = await this.handleStreamData(data);
                                     if (shouldStop) {
                                         clearInterval(activityTimeout);
-                                        return true; // Sukses, proses dihentikan oleh 'completed' event
+                                        return true;
                                     }
                                     if (data.type === 'error') throw new Error(data.message);
                                 } catch (parseError) {
@@ -343,15 +361,33 @@ document.addEventListener('alpine:init', () => {
                     }
                 } finally {
                     clearInterval(activityTimeout);
-                    // Selalu coba cancel reader untuk membersihkan resource
-                    try { reader.cancel(); } catch (e) { /* Mungkin sudah ditutup */ }
+                    try { reader.cancel(); } catch (e) { /* Already closed */ }
                 }
                 
             } catch (error) {
                 console.error('Streaming method failed:', error);
-                // Gagal, kembalikan false agar startAnalysis bisa fallback
                 return false; 
             }
+        },
+
+        // FIX 5: Add method to refresh entire view if needed
+        refreshView() {
+            this.$nextTick(() => {
+                // Force Alpine.js to re-evaluate reactive data
+                this.analysisHistory = [...this.analysisHistory];
+                console.log('View refreshed');
+            });
+        },
+
+        // FIX 6: Enhanced loadAnalysisFromHistory with tracking
+        loadAnalysisFromHistory(analysis) {
+            this.businessIdea = analysis.idea_prompt;
+            this.rawMarkdown = analysis.report_markdown;
+            this.chatHistory = []; // Reset chat when loading a new report
+            this.currentAnalysisId = analysis.id; // Track current analysis
+            this.isHistoryPanelOpen = false;
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            this.showNotification('Analysis loaded from history.');
         },
 
         async trySimpleAnalysis() {
@@ -417,9 +453,24 @@ document.addEventListener('alpine:init', () => {
                     console.log(`Progress: ${data.step}/${data.total} - ${data.message}`);
                     break;
                     
+                // FIX 1: Handle report_chunk events to build the markdown content
+                case 'report_chunk':
+                    this.rawMarkdown += data.chunk;
+                    console.log('Received report chunk, total length:', this.rawMarkdown.length);
+                    break;
+                    
+                // FIX 2: Handle completed event properly
+                case 'completed':
+                    console.log('Analysis completed:', data.message);
+                    this.isLoading = false;
+                    this.fetchHistory(); // Refresh history
+                    this.showNotification('Analysis completed successfully!');
+                    return true; // Signal to stop streaming
+                    
                 case 'error':
                     throw new Error(data.message);
             }
+            return false; // Continue streaming
         },
 
         shouldRetryStreaming(error) {
